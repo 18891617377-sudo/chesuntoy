@@ -431,23 +431,77 @@ namespace MetroUninstaller
             return n;
         }
 
+        /// <summary>查询服务状态，返回 RUNNING / STOPPED / STOP_PENDING / NOT_FOUND / UNKNOWN。</summary>
+        private static string QueryServiceState(string name)
+        {
+            ExecResult r = Executor.Run("sc.exe", "query \"" + name + "\"", 30000, null);
+            string o = (r.Output ?? "").ToUpperInvariant();
+            if (o.IndexOf("1060", StringComparison.Ordinal) >= 0) return "NOT_FOUND";
+            if (o.IndexOf("STOP_PENDING", StringComparison.Ordinal) >= 0) return "STOP_PENDING";
+            if (o.IndexOf("START_PENDING", StringComparison.Ordinal) >= 0) return "START_PENDING";
+            if (o.IndexOf("RUNNING", StringComparison.Ordinal) >= 0) return "RUNNING";
+            if (o.IndexOf("STOPPED", StringComparison.Ordinal) >= 0) return "STOPPED";
+            return "UNKNOWN";
+        }
+
+        /// <summary>把服务启动类型改成 disabled，防止被外部拉起或重启后再次加载。</summary>
+        private static void DisableServiceStart(string name, Action<string> L)
+        {
+            ExecResult r = Executor.Run("sc.exe", "config \"" + name + "\" start= disabled", 30000, null);
+            if (r.ExitCode == 0) L("已将 " + name + " 的启动类型设为 disabled");
+        }
+
+        /// <summary>尽力停止服务；驱动不支持 unload 时返回 false，由调用方转入重启删除。</summary>
+        private static bool StopServiceHard(string name, Action<string> L)
+        {
+            string state = QueryServiceState(name);
+            if (state == "NOT_FOUND" || state == "STOPPED") return true;
+            for (int i = 0; i < 3; i++)
+            {
+                Executor.Run("sc.exe", "stop \"" + name + "\"", 45000, null);
+                for (int w = 0; w < 20; w++)
+                {
+                    Thread.Sleep(1000);
+                    state = QueryServiceState(name);
+                    if (state == "STOPPED" || state == "NOT_FOUND") return true;
+                    if (state == "RUNNING" && w >= 4) break;
+                }
+            }
+            L("驱动 " + name + " 仍在运行（内核对象未释放），无法热卸载，转入重启删除。");
+            return false;
+        }
+
         private static bool DeleteService(string name, Action<string> L)
         {
-            Executor.Run("sc.exe", "stop \"" + name + "\"", 45000, null);
-            Thread.Sleep(600);
+            DisableServiceStart(name, L);
+            StopServiceHard(name, L);
             ExecResult r = Executor.Run("sc.exe", "delete \"" + name + "\"", 45000, null);
-            string output = r.Output ?? "";
-            bool ok = r.ExitCode == 0 || output.IndexOf("1060", StringComparison.Ordinal) >= 0
-                || output.IndexOf("SUCCESS", StringComparison.OrdinalIgnoreCase) >= 0;
-            if (ok) L("已删除服务 " + name);
+            string output = (r.Output ?? "").Trim();
+            bool ok = r.ExitCode == 0
+                || output.IndexOf("SUCCESS", StringComparison.OrdinalIgnoreCase) >= 0
+                || output.IndexOf("成功", StringComparison.Ordinal) >= 0
+                || output.IndexOf("1060", StringComparison.Ordinal) >= 0   // 服务不存在
+                || output.IndexOf("1072", StringComparison.Ordinal) >= 0;  // 已标记删除
+            if (ok) L("已删除驱动服务 " + name + (output.IndexOf("1072", StringComparison.Ordinal) >= 0 ? "（已标记重启后删除）" : ""));
             else L("错误：删除服务失败 " + name + " — " + output);
             return ok;
         }
 
         private static bool DeleteDriver(DriverInfo d, Action<string> L)
         {
-            L("正在卸载驱动 " + d.ServiceName + "（" + d.Resolution() + "）");
+            L("强制移除驱动 " + d.ServiceName + "（" + d.Resolution() + "）");
+            if (d.State.IndexOf("运行", StringComparison.Ordinal) >= 0 ||
+                d.State.IndexOf("RUN", StringComparison.OrdinalIgnoreCase) >= 0)
+                L("检测到该驱动正在内核中加载，先禁用启动并尝试热停止；不支持 unload 的驱动将在重启时完成文件删除。");
+
             bool serviceOk = DeleteService(d.ServiceName, L);
+            if (!serviceOk && Admin.IsAdmin)
+            {
+                string so;
+                if (SystemRunner.DeleteServiceAsSystem(d.ServiceName, out so))
+                    L("已由 SYSTEM 权限删除服务 " + d.ServiceName + " — " + so);
+            }
+
             bool fileOk = true;
             if (!string.IsNullOrEmpty(d.ResolvedPath) && File.Exists(d.ResolvedPath))
             {
@@ -459,13 +513,57 @@ namespace MetroUninstaller
                 }
                 catch (Exception ex)
                 {
-                    if (PendingDelete.Schedule(d.ResolvedPath))
-                        L("驱动文件被占用，已登记重启后删除 " + d.ResolvedPath);
-                    else { fileOk = false; L("错误：驱动文件删除失败 " + ex.Message); }
+                    L("直接删除被拒绝（" + ex.Message + "），改用 SYSTEM 接管所有权…");
+                    if (Admin.IsAdmin && SystemRunner.ForceDelete(d.ResolvedPath, false))
+                    {
+                        L("已由 SYSTEM 强制删除驱动文件 " + d.ResolvedPath);
+                    }
+                    else if (PendingDelete.Schedule(d.ResolvedPath))
+                        L("驱动文件仍被内核占用，已登记重启后删除 " + d.ResolvedPath);
+                    else { fileOk = false; L("错误：驱动文件删除失败 " + d.ResolvedPath); }
                 }
             }
+
+            // 清掉 DriverStore 里的驱动包，避免设备管理器再次自动装回
+            if (!string.IsNullOrEmpty(d.ResolvedPath))
+            {
+                string inf = DriverPackageInf(d.ResolvedPath);
+                if (inf.Length > 0 && Admin.IsAdmin)
+                {
+                    string po;
+                    if (SystemRunner.RemoveDriverPackage(inf, out po))
+                        L("已移除 DriverStore 驱动包 " + inf);
+                    else L("驱动包移除未完成（可能被设备占用，重启后再试）：" + inf);
+                }
+            }
+
             Reg.DeleteKey(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\" + d.ServiceName, null);
+            if (Reg.Exists(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\" + d.ServiceName) && Admin.IsAdmin)
+            {
+                string regOut;
+                SystemRunner.Run("reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\" + d.ServiceName + "\" /f", 60000, out regOut);
+            }
+
             return serviceOk || fileOk;
+        }
+
+        /// <summary>从 DriverStore 路径推出 oemXX.inf 名称。</summary>
+        private static string DriverPackageInf(string path)
+        {
+            try
+            {
+                string low = path.ToLowerInvariant();
+                int idx = low.IndexOf("\\driverstore\\filerepository\\", StringComparison.Ordinal);
+                if (idx < 0) return "";
+                string folder = path.Substring(idx + "\\driverstore\\filerepository\\".Length);
+                int sep = folder.IndexOf('\\');
+                if (sep > 0) folder = folder.Substring(0, sep);
+                int us = folder.IndexOf("_amd64_", StringComparison.OrdinalIgnoreCase);
+                if (us < 0) us = folder.IndexOf("_x86_", StringComparison.OrdinalIgnoreCase);
+                if (us > 0) folder = folder.Substring(0, us);
+                return folder.ToLowerInvariant().EndsWith(".inf") ? folder : "";
+            }
+            catch { return ""; }
         }
 
         /// <summary>服务/注册表先处理，文件次之，目录最后，避免目录把子项提前锁死。</summary>

@@ -16,6 +16,9 @@ namespace MetroUninstaller
         [STAThread]
         private static void Main()
         {
+            // 驱动强制删除、SYSTEM 接管都需要管理员；启动时直接申请提权
+            if (!Admin.IsAdmin) Admin.RelaunchElevated();
+
             try
             {
                 uint dpi = GetDpiForSystem();

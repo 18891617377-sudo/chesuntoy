@@ -312,11 +312,13 @@ namespace MetroUninstaller
             lines.Add("文件：" + d.ResolvedPath);
             lines.Add("签名：" + d.Resolution());
             lines.Add("归属：" + (d.OwnerSoftware.Length > 0 ? d.OwnerSoftware : "未匹配") + "（" + d.Attribution + "%）");
-            lines.Add("~删除前会备份 .sys 文件与 Services 注册表项；文件占用时登记重启删除");
+            lines.Add("~删除前会备份 .sys 文件与 Services 注册表项");
+            lines.Add("~运行中的驱动：禁用启动 → 尝试热停止 → 删除服务 → 文件在重启时强制删除");
+            lines.Add("~ACL 拒绝时自动用 SYSTEM 权限接管所有权；需要重启才能彻底清空内核中的镜像");
 
             Overlay ov = new Overlay();
-            ov.Title = "卸载内核驱动";
-            ov.Subtitle = "该操作会停止并删除驱动服务，然后删除驱动文件";
+            ov.Title = "强制卸载内核驱动";
+            ov.Subtitle = "驱动力图立即卸载；内核仍占用时登记重启删除，确保重启后不再加载";
             ov.Items = lines;
             ov.PrimaryText = "卸载驱动";
             ov.SecondaryText = "取消";
@@ -343,13 +345,14 @@ namespace MetroUninstaller
             }
 
             List<string> lines = new List<string>();
-            lines.Add("!" + list.Count + " 个明确归属的驱动将被停止、删除服务并删除文件");
+            lines.Add("!" + list.Count + " 个明确归属的驱动将被强制停止、删除服务并删除文件（运行中的重启后清空）");
             foreach (DriverInfo d in list)
             {
                 if (lines.Count > 12) break;
                 lines.Add(d.ServiceName + "  ·  " + (d.OwnerSoftware.Length > 0 ? d.OwnerSoftware : "归属 " + d.Attribution + "%"));
             }
             lines.Add("~系统原生 / WHQL 驱动不在列表中");
+            lines.Add("~ACL 被拒时自动 SYSTEM 接管；内核占用则登记重启删除");
 
             Overlay ov = new Overlay();
             ov.Title = "批量清理驱动";

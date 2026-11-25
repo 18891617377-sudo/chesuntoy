@@ -3,7 +3,7 @@
 Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两件事：把普通软件的**全量残留**清干净，同时只移除**明确归属于目标软件**的内核驱动，系统原生 / WHQL / 其他软件驱动一律锁定。
 
 - 语言 / 技术栈：C#（.NET Framework 4.8）+ WinForms 自绘 Metro 控件，无第三方依赖
-- 编译产物：`CHESUNUninstaller.exe`（单文件，约 160 KB）
+- 编译产物：`CHESUNUninstaller.exe`（单文件，约 168 KB）
 - 编译状态：**通过，0 错误 0 警告**
 - 真机运行状态：**已在 Windows Sandbox 内启动并验证界面与扫描流程**（宿主因 WDAC 策略拦截未签名 exe，详见第 5 节）
 
@@ -156,7 +156,7 @@ WindowsSandbox.exe .\run-in-sandbox.wsb
 当前构建 SHA256：
 
 ```
-ED16FBC4733132B03017EE355B0D0945674C51CC7988212F48CAF2F91033FD82
+C0D31930FBDD99463F2EB0EF4176595D50569B4141A1C9B19AE6949AC57C0251
 ```
 
 宿主直接运行仍需签名或 WDAC 补充策略放行；沙盒 / 虚拟机内无需放行。
@@ -192,6 +192,17 @@ ED16FBC4733132B03017EE355B0D0945674C51CC7988212F48CAF2F91033FD82
   - 残留清理顺序改为 **服务 → 注册表/任务/环境变量 → 文件 → 目录**，避免目录先删导致子项被锁。
   - 文件/目录删除被拒绝时，自动 `takeown` + `icacls` 接管所有权后重试一次，仍失败才登记"重启后删除"。
 - 首屏自绘控件未排版（空白窗口）与中文标题方框（Segoe UI Light 缺字）两处修复。
+
+---
+
+## 7.1 v1.2 变更（2026-11-26，强制驱动移除）
+
+- **启动即提权**：非管理员启动时自动 `runas` 重新拉起自己，避免“驱动清理不可用”。
+- **运行中驱动强制移除流程**：`sc config start= disabled` → 轮询 `sc stop`（最多约 60 秒）→ `sc delete`（接受 1072 已标记删除）→ 删文件 → 仍失败则登记 `PendingFileRenameOperations` 重启删除 → 清理 Services 键。
+- **SYSTEM 权限兜底**（新增 `src/Services/SystemRunner.cs`）：通过临时计划任务以 `LocalSystem` 运行 `takeown /f` + `icacls /grant *S-1-5-32-544:F` + `del`，处理 TrustedInstaller / SYSTEM ACL 拒绝；不伪造令牌，走 Windows 原生 SYSTEM 账户。
+- **DriverStore 驱动包清理**：从 `FileRepository\<oemXX.inf>_amd64_*` 解析 INF 名，执行 `pnputil /delete-driver <inf> /uninstall /force`，避免设备管理器再自动装回。
+- **内核占用是硬限制**：已映射进内核的驱动镜像无法在运行期 unlink，必须重启；工具保证重启前服务已被禁用/删除，重启时文件被删除，之后不再加载。
+- 仍保留安全红线：系统原生、Microsoft 签名、Boot/System 级、关键服务名驱动不进入删除队列。
 
 ---
 
