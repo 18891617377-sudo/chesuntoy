@@ -1,0 +1,15 @@
+<Configuration>
+  <VGpu>Disable</VGpu>
+  <Networking>Default</Networking>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\18891\Doubao\chats\2026-11-25\new-chat-2\MetroUninstaller</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\MetroUninstaller</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>cmd.exe /c start "" "C:\Users\WDAGUtilityAccount\Desktop\MetroUninstaller\CHESUNUninstaller.exe"</Command>
+  </LogonCommand>
+</Configuration>
+

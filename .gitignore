@@ -1,0 +1,11 @@
+# build outputs
+*.exe
+*.pdb
+*.zip
+
+# local verification screenshots
+sandbox-shots/
+
+# OS junk
+Thumbs.db
+desktop.ini
