@@ -165,7 +165,7 @@ WindowsSandbox.exe .\run-in-sandbox.wsb
 当前构建 SHA256：
 
 ```
-16980FB2B7098A26EC8946224C5C174D2A49EC0113957A439B0241EDD4367F3D
+B28119A9AFA0CAD0C776154A780A7C0D10BC2C18CAACE0D855D6FD6DE667996B
 ```
 
 宿主直接运行仍需签名或 WDAC 补充策略放行；沙盒 / 虚拟机内无需放行。
@@ -230,6 +230,7 @@ WindowsSandbox.exe .\run-in-sandbox.wsb
   - `BuildWadcDeny`：调用 ConfigCI 生成按哈希 Deny 的 `policy.cip` 与 `deploy-wdac.cmd`。
 - 驱动页新增「反 Rootkit / Bootkit 扫描」入口，详情面板新增「卸载该驱动 / WDAC 拉黑 / 离线清理包」三个按钮。
 - WDAC 生成修正：先把 `AllowAll.xml` 复制到输出目录再 `Merge-CIPolicy`，避免直接读写 `%WINDIR%\schemas` 被拒绝。
+- 离线脚本修正：从离线 SYSTEM 的 `Select\Current` 推导 `ControlSet00N`，不再硬编码 `ControlSet001`；EFI 清理同时纳入「高 / 中」级 ESP 命中项。
 - README 补齐反 Rootkit / Bootkit 能力、已知边界与 v1.3 说明。
 
 ---

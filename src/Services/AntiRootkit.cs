@@ -189,9 +189,12 @@ namespace MetroUninstaller
             sb.AppendLine("set BK=%ROOT%\\CHESUN-Backup\\" + AppPaths.Sanitize(d.ServiceName) + "_%date:~0,4%%date:~5,2%%date:~8,2%_%time:~0,2%%time:~3,2%");
             sb.AppendLine("if not exist \"%BK%\" mkdir \"%BK%\"");
             sb.AppendLine("reg load HKLM\\CHESUN_OFF \"%ROOT%\\Windows\\System32\\config\\SYSTEM\" >nul 2>&1");
-            sb.AppendLine("reg export HKLM\\CHESUN_OFF\\ControlSet001\\Services\\%SVC% \"%BK%\\service.reg\" /y >nul 2>&1");
-            sb.AppendLine("reg add HKLM\\CHESUN_OFF\\ControlSet001\\Services\\%SVC% /v Start /t REG_DWORD /d 4 /f >nul 2>&1");
-            sb.AppendLine("reg delete HKLM\\CHESUN_OFF\\ControlSet001\\Services\\%SVC% /f >nul 2>&1");
+            sb.AppendLine("for /f \"tokens=3\" %%i in ('reg query HKLM\\CHESUN_OFF\\Select /v Current 2^>nul') do set CSN=%%i");
+            sb.AppendLine("if not defined CSN set CSN=1");
+            sb.AppendLine("set CS=ControlSet00%CSN%");
+            sb.AppendLine("reg export HKLM\\CHESUN_OFF\\%CS%\\Services\\%SVC% \"%BK%\\service.reg\" /y >nul 2>&1");
+            sb.AppendLine("reg add HKLM\\CHESUN_OFF\\%CS%\\Services\\%SVC% /v Start /t REG_DWORD /d 4 /f >nul 2>&1");
+            sb.AppendLine("reg delete HKLM\\CHESUN_OFF\\%CS%\\Services\\%SVC% /f >nul 2>&1");
             sb.AppendLine("reg unload HKLM\\CHESUN_OFF >nul 2>&1");
             sb.AppendLine("if exist \"%SYS%\" copy /y \"%SYS%\" \"%BK%\\\" >nul 2>&1 & del /f /q \"%SYS%\"");
             if (storeFolder.Length > 0)
@@ -212,7 +215,7 @@ namespace MetroUninstaller
             int count = 0;
             foreach (Finding f in bootFindings)
             {
-                if (f.Severity != "高") continue;
+                if (f.Severity != "高" && f.Severity != "中") continue;
                 if (f.Detail.IndexOf("ESP:", StringComparison.OrdinalIgnoreCase) < 0) continue;
                 string p = f.Detail.Split(' ')[0].Replace("ESP:", "%ESP%");
                 efi.AppendLine("if exist \"" + p + "\" (copy /y \"" + p + "\" \"%BK%\\\" >nul 2>&1 & del /f /q \"" + p + "\")");
