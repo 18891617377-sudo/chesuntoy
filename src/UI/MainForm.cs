@@ -304,24 +304,14 @@ namespace MetroUninstaller
             {
                 "当前状态：" + SigningHelper.Describe(sig),
                 "程序文件：" + exe,
-                "",
-                "方式 A · 本机自签名（推荐给个人使用）",
-                "点“生成签名工具包” → 右键 make-test-sign.ps1 用 PowerShell 运行",
-                "→ 自动创建自签名证书、信任证书、签出 CHESUNUninstaller-signed.exe",
-                "→ 双击 run-signed.cmd 运行签名副本",
-                "",
-                "方式 B · 正式发布",
-                "购买 OV/EV Authenticode 证书，用 signtool 签原 exe；",
-                "自签名证书只在本机可信，不能拿去给公开发行版签名。",
-                "",
-                "方式 C · 测试签名（testsigning）",
-                "只影响内核驱动的签名校验，不能让未签名 exe 绕过 WDAC；",
-                "工具包里带 enable-testsigning.cmd / disable-testsigning.cmd，仅在测未签名驱动时用。",
-                "",
-                "方式 D · 沙盒",
-                "run-in-sandbox.wsb 内不需要签名，宿主 WDAC 不影响沙盒。",
-                "",
-                "工具包需要 signtool.exe（Windows SDK 的 Code Signing Tools），缺失时脚本会给出下载地址。"
+                "方式 A（推荐）：生成工具包，运行 make-test-sign.ps1",
+                "→ 自动签出 CHESUNUninstaller-signed.exe，双击 run-signed.cmd",
+                "方式 B（正式发布）：购买 OV/EV 证书，用 signtool 签原 exe",
+                "方式 C（测试签名）：只放宽内核驱动校验；设置页可开关，不能放行本 exe",
+                "方式 D（沙盒）：run-in-sandbox.wsb 内不需要签名",
+                "自签名证书只在本机可信，不要拿去给公开发行版签名",
+                "工具包需要 signtool.exe（Windows SDK 的 Code Signing Tools），缺失时脚本会给下载地址",
+                "详细步骤与边界见工具包内 README.txt"
             };
             ov.PrimaryText = "生成签名工具包";
             ov.SecondaryText = "稍后";
