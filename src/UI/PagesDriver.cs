@@ -15,11 +15,11 @@ namespace MetroUninstaller
             public MetroRow Row;
         }
 
-        private MetroButton _filterAll, _filterSusp, _filterOwned, _refresh, _cleanAll;
+        private MetroButton _filterAll, _filterSusp, _filterOwned, _refresh, _cleanAll, _btnRootkit;
         private ScrollPanel _list;
         private Label _count, _empty;
         private SidePanel _detail;
-        private MetroButton _btnDel;
+        private MetroButton _btnDel, _btnWadc, _btnOffline;
         private List<DriverRow> _rows = new List<DriverRow>();
         private DriverInfo _selected;
         private string _filter = "all";
@@ -47,6 +47,13 @@ namespace MetroUninstaller
             _cleanAll.FontSize = 9.5f;
             _cleanAll.Click += delegate { CleanAllDeletable(); };
             Controls.Add(_cleanAll);
+
+            _btnRootkit = new MetroButton();
+            _btnRootkit.Text = "反 Rootkit / Bootkit 扫描";
+            _btnRootkit.FontSize = 9f;
+            _btnRootkit.Outline = true;
+            _btnRootkit.Click += delegate { ScanAntiMalware(); };
+            Controls.Add(_btnRootkit);
 
             _count = new Label();
             _count.AutoSize = false;
@@ -79,6 +86,20 @@ namespace MetroUninstaller
             _btnDel.FontSize = 11f;
             _btnDel.Click += delegate { DeleteSelected(); };
             _detail.Footer.Controls.Add(_btnDel);
+
+            _btnWadc = new MetroButton();
+            _btnWadc.Text = "WDAC 拉黑";
+            _btnWadc.FontSize = 9f;
+            _btnWadc.Outline = true;
+            _btnWadc.Click += delegate { GenerateWadc(); };
+            _detail.Footer.Controls.Add(_btnWadc);
+
+            _btnOffline = new MetroButton();
+            _btnOffline.Text = "离线清理包";
+            _btnOffline.FontSize = 9f;
+            _btnOffline.Outline = true;
+            _btnOffline.Click += delegate { GenerateOfflinePack(); };
+            _detail.Footer.Controls.Add(_btnOffline);
 
             Main.DataReady += delegate
             {
@@ -123,7 +144,8 @@ namespace MetroUninstaller
             _filterAll.SetBounds(x, y, Theme.S(112), h); x += Theme.S(122);
             _filterSusp.SetBounds(x, y, Theme.S(118), h); x += Theme.S(128);
             _filterOwned.SetBounds(x, y, Theme.S(96), h); x += Theme.S(106);
-            _refresh.SetBounds(x, y, Theme.S(108), h);
+            _refresh.SetBounds(x, y, Theme.S(108), h); x += Theme.S(118);
+            _btnRootkit.SetBounds(x, y, Theme.S(190), h);
             _cleanAll.SetBounds(Width - pad - Theme.S(184), y, Theme.S(184), h);
             _count.SetBounds(_cleanAll.Left - Theme.S(250), y, Theme.S(240), h);
 
@@ -139,8 +161,15 @@ namespace MetroUninstaller
         {
             if (_btnDel == null) return;
             int fw = _detail.Footer.Width;
-            _btnDel.Size = new Size(Theme.S(210), Theme.S(58));
-            _btnDel.Location = new Point(fw - Theme.S(24) - _btnDel.Width, Theme.S(24));
+            _btnDel.Size = new Size(Theme.S(150), Theme.S(54));
+            _btnDel.Location = new Point(fw - Theme.S(24) - _btnDel.Width, Theme.S(26));
+            if (_btnWadc != null)
+            {
+                _btnWadc.Size = new Size(Theme.S(100), Theme.S(54));
+                _btnWadc.Location = new Point(_btnDel.Left - Theme.S(8) - _btnWadc.Width, Theme.S(26));
+                _btnOffline.Size = new Size(Theme.S(100), Theme.S(54));
+                _btnOffline.Location = new Point(_btnWadc.Left - Theme.S(8) - _btnOffline.Width, Theme.S(26));
+            }
         }
 
         private bool Match(DriverInfo d)
@@ -301,6 +330,148 @@ namespace MetroUninstaller
 
             body.ResumeLayout();
             _detail.Invalidate();
+        }
+
+        private void ScanAntiMalware()
+        {
+            if (_busy) return;
+            _busy = true;
+            Overlay busy = NewBusy("反 Rootkit / Bootkit 扫描", "校验驱动签名、隐藏服务、BCD 与 ESP 引导组件…");
+            Thread t = new Thread(delegate ()
+            {
+                List<Finding> all = new List<Finding>();
+                try
+                {
+                    List<DriverInfo> ds = Main.Drivers;
+                    if (ds == null) ds = DriverInventory.LoadAll(null);
+                    all.AddRange(AntiRootkit.ScanRootkit(ds));
+                    all.AddRange(AntiRootkit.ScanBootkit());
+                }
+                catch (Exception ex) { AppendLog(busy, "错误：" + ex.Message); }
+
+                try
+                {
+                    if (!IsHandleCreated || IsDisposed) return;
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        CloseOverlay(busy);
+                        _busy = false;
+                        int high = 0, mid = 0;
+                        foreach (Finding f in all) { if (f.Severity == "高") high++; else if (f.Severity == "中") mid++; }
+                        Overlay ov = new Overlay();
+                        ov.Title = "反 Rootkit / Bootkit 扫描结果";
+                        ov.Subtitle = "高危 " + high + " 项 · 可疑 " + mid + " 项 · 共 " + all.Count + " 条";
+                        List<string> lines = new List<string>();
+                        foreach (Finding f in all)
+                        {
+                            if (lines.Count >= 30) { lines.Add("… 其余 " + (all.Count - 30) + " 条见日志"); break; }
+                            lines.Add(f.ToString());
+                        }
+                        if (lines.Count == 0) lines.Add("未发现可疑项。");
+                        ov.Items = lines;
+                        ov.PrimaryText = "关闭";
+                        ov.SecondaryText = "";
+                        ov.Primary += delegate { CloseOverlay(ov); };
+                        ov.Attach(this);
+                    });
+                }
+                catch { }
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        private void GenerateWadc()
+        {
+            if (_selected == null || _busy) return;
+            if (!Admin.IsAdmin) { ShowMessage("需要管理员权限", "WDAC 策略生成需要读取驱动文件哈希并以管理员写入。"); return; }
+            DriverInfo d = _selected;
+            _busy = true;
+            Overlay busy = NewBusy("生成 WDAC 拒绝策略", d.ServiceName + " · 按文件哈希生成 Deny 规则…");
+            Thread t = new Thread(delegate ()
+            {
+                string dir = null, deploy = null, err = null;
+                try { dir = AntiRootkit.BuildWadcDeny(d, out deploy); }
+                catch (Exception ex) { err = ex.Message; }
+
+                try
+                {
+                    if (!IsHandleCreated || IsDisposed) return;
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        CloseOverlay(busy);
+                        _busy = false;
+                        if (dir == null) { ShowMessage("WDAC 策略生成失败", err ?? "未知错误"); return; }
+                        Overlay ov = new Overlay();
+                        ov.Title = "WDAC 拒绝策略已生成";
+                        ov.Subtitle = "重启后该驱动会被内核拒绝加载";
+                        ov.Items = new List<string>
+                        {
+                            "目录：" + dir,
+                            "策略：" + System.IO.Path.Combine(dir, "policy.cip"),
+                            "部署脚本：" + deploy,
+                            "~部署前请先在测试机确认，避免误拦导致无法启动",
+                            "~回滚：删除 CiPolicies\\Active 下对应 .cip 后重启"
+                        };
+                        ov.PrimaryText = "打开目录";
+                        ov.SecondaryText = "关闭";
+                        ov.Primary += delegate { CloseOverlay(ov); MainForm.OpenPath(dir); };
+                        ov.Secondary += delegate { CloseOverlay(ov); };
+                        ov.Attach(this);
+                    });
+                }
+                catch { }
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        private void GenerateOfflinePack()
+        {
+            if (_selected == null || _busy) return;
+            DriverInfo d = _selected;
+            _busy = true;
+            Overlay busy = NewBusy("生成离线清理包", d.ServiceName + " · 扫描 ESP 并写入 WinPE 脚本…");
+            Thread t = new Thread(delegate ()
+            {
+                string dir = null, readme = null, err = null;
+                try
+                {
+                    List<Finding> boot = AntiRootkit.ScanBootkit();
+                    dir = AntiRootkit.BuildOfflinePack(d, boot, out readme);
+                }
+                catch (Exception ex) { err = ex.Message; }
+
+                try
+                {
+                    if (!IsHandleCreated || IsDisposed) return;
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        CloseOverlay(busy);
+                        _busy = false;
+                        if (dir == null) { ShowMessage("离线清理包生成失败", err ?? "未知错误"); return; }
+                        Overlay ov = new Overlay();
+                        ov.Title = "离线清理包已生成";
+                        ov.Subtitle = "在微 PE / WinRE 中执行，彻底绕过运行中的内核";
+                        ov.Items = new List<string>
+                        {
+                            "目录：" + dir,
+                            "说明：" + readme,
+                            "~clean-driver.cmd D:\\ 清服务、禁用启动、删 sys 与 DriverStore 包",
+                            "~clean-efi.cmd 需先 mountvol S: /S，删除前自动备份",
+                            "~删了 bootmgfw.efi 后用 bcdboot 修复引导"
+                        };
+                        ov.PrimaryText = "打开目录";
+                        ov.SecondaryText = "关闭";
+                        ov.Primary += delegate { CloseOverlay(ov); MainForm.OpenPath(dir); };
+                        ov.Secondary += delegate { CloseOverlay(ov); };
+                        ov.Attach(this);
+                    });
+                }
+                catch { }
+            });
+            t.IsBackground = true;
+            t.Start();
         }
 
         private void DeleteSelected()

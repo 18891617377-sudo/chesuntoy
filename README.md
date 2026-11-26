@@ -45,14 +45,21 @@ Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两�
   - Microsoft 签名、Boot/System 级驱动、用户白名单
   - 安装目录过于宽泛（盘符根、`Program Files`、`Windows`、用户目录）时，直接跳过文件扫描与「服务程序位于安装目录」判定
   - 厂商公共根（`Microsoft` / `Google` / `Adobe` / `Intel` / `NVIDIA` / `Valve` …）的注册表键与数据目录**只允许向下一层匹配具体产品**，永不会整根删除
-- 删除前：备份 `.sys` 文件与 `Services` 注册表项 → `sc stop` → `sc delete` → 删文件（占用则重启删除）。
+- 删除前：备份 `.sys` 文件与 `Services` 注册表项 → 禁用启动（`Start=4`）→ 多轮 `sc stop` → `sc delete` → 删文件（占用则 SYSTEM 计划任务接管 → 仍失败登记重启删除）→ `pnputil` 清 DriverStore 驱动包。
 - 二次确认：确认清单 → 「永久删除」第二次确认才真正执行。
 
-### 1.3 一键全流程
+### 1.3 反 Rootkit / 反 Bootkit
+
+- **Rootkit 启发式扫描**：服务存在但驱动文件缺失、无签名且不在系统目录、`Start=4` 却仍在运行（隐藏服务）、文件位于 Temp / Downloads / AppData、非微软签名的 Boot/System 级驱动；输出高危 / 可疑分级清单。
+- **Bootkit 扫描**：读取 Secure Boot 状态，解析 `bcdedit /enum all` 中的非标准 `.efi` 加载路径；`mountvol S: /S` 挂载 ESP 后遍历 `\EFI` 下的 `.efi/.exe/.dll`，逐个校验签名，非微软签名项标红，`finally` 卸载 ESP。
+- **WinPE 离线清理包**：一键生成 `clean-driver.cmd` + `clean-efi.cmd` + `README.txt`。离线挂载 SYSTEM 注册表 → 备份 → 禁用并删除服务键 → 删除 `System32\drivers\*.sys` → 删除 DriverStore 包；EFI 部分先备份再删除可疑引导组件，并提示用 `bcdboot` 修复引导。在 WinPE / 微 PE 下原系统内核不运行，可彻底绕过运行中驱动无法卸载的限制。
+- **WDAC 按哈希拉黑**：调用系统自带 ConfigCI（`New-CIPolicyRule -Level Hash -DriverFilePath ... -Deny`），以 `AllowAll.xml` 为底合并，生成 `policy.cip` + `deploy-wdac.cmd`。部署后该驱动文件哈希被内核拒绝加载，重启即失效；脚本不自动部署，避免误拦导致无法启动。
+
+### 1.4 一键全流程
 
 `终止进程 → 卸载主程序（QuietUninstallString / msiexec /qn）→ 深度扫描 → 匹配驱动 → 备份 → 删除 → 报告`，全程日志实时显示在覆盖层。
 
-### 1.4 安全保障
+### 1.5 安全保障
 
 - 卸载前调用 WMI `SystemRestore.CreateRestorePoint`（系统保护未开启时告警并继续）
 - 删除前备份：文件复制 + `reg export`，默认保留 7 天，可在「还原点管理」页一键恢复
@@ -71,7 +78,7 @@ Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两�
 |---|---|
 | 起始页 | 磁贴网格：310×310（软件卸载 / 驱动管理）、310×150（扫描历史 / 系统状态）、150×150（设置 / 还原点 / 白名单）；磁贴实时显示软件数、可疑驱动数 |
 | 软件卸载 | 搜索栏 + 「一键深度扫描」方形按钮 + 长条磁贴列表（选中项强调色填充）+ 右侧滑入详情面板（基本信息 / 残留统计 / 关联驱动 / 一键卸载） |
-| 驱动管理 | 全部 / 可疑无签名 / 可归属 三种筛选；行内色块标签（无签名红、受保护灰、归属百分比橙）；详情展示签名、路径、加载级别、状态、四维证据 |
+| 驱动管理 | 全部 / 可疑无签名 / 可归属 三种筛选；行内色块标签（无签名红、受保护灰、归属百分比橙）；详情展示签名、路径、加载级别、状态、四维证据；顶部「反 Rootkit / Bootkit 扫描」，详情底部「卸载该驱动 / WDAC 拉黑 / 离线清理包」 |
 | 扫描历史 | 报告归档，点击用默认浏览器打开 HTML |
 | 系统状态 | 操作系统、权限、还原点状态、备份占用、待重启项 |
 | 设置 | 还原点、备份、保留天数、深度扫描、卸载程序超时、文件数上限（点击切换） |
@@ -103,7 +110,9 @@ MetroUninstaller/
    │  ├─ SafetyGuard.cs           # 系统保护、厂商根、白名单、安全目录判定
    │  ├─ BackupService.cs         # 备份清单/恢复/过期清理（含 RestorePointService 还原点）
    │  ├─ Executor.cs              # 外部命令、注册表操作、重启删除
-   │  ├─ UninstallPipeline.cs     # 一键流程 / 驱动批量清理
+   │  ├─ UninstallPipeline.cs     # 一键流程 / 驱动强制清理
+   │  ├─ SystemRunner.cs          # SYSTEM 计划任务兜底删除
+   │  ├─ AntiRootkit.cs           # Rootkit/Bootkit 扫描、WinPE 离线包、WDAC 策略
    │  ├─ ReportWriter.cs          # HTML 报告 + 历史摘要
    │  └─ HistoryStore.cs（同文件）
    └─ UI/
@@ -127,8 +136,8 @@ pwsh -File .\build.ps1
 .\CHESUNUninstaller.exe
 ```
 
-- 程序以 `asInvoker` 启动，未提权时顶栏显示「标准权限 / 以管理员身份重启」，驱动清理与还原点按钮会提示权限不足。
-- 生产环境可把 `app.manifest` 中 `level="asInvoker"` 改为 `requireAdministrator`，双击即请求 UAC。
+- 程序启动时检测权限，非管理员会自动弹 UAC 重新拉起（`runas`）；因此驱动清理与还原点按钮开箱即用。
+- `app.manifest` 仍声明 `asInvoker`，提权由程序自身完成，兼容从沙盒 / 受限环境启动。
 - 运行数据：`%LOCALAPPDATA%\CHESUN Uninstaller\`（`Backups` / `Reports` / `Logs` / `settings.ini` / `whitelist.txt`）。
 
 ---
@@ -156,7 +165,7 @@ WindowsSandbox.exe .\run-in-sandbox.wsb
 当前构建 SHA256：
 
 ```
-C0D31930FBDD99463F2EB0EF4176595D50569B4141A1C9B19AE6949AC57C0251
+16980FB2B7098A26EC8946224C5C174D2A49EC0113957A439B0241EDD4367F3D
 ```
 
 宿主直接运行仍需签名或 WDAC 补充策略放行；沙盒 / 虚拟机内无需放行。
@@ -172,6 +181,12 @@ C0D31930FBDD99463F2EB0EF4176595D50569B4141A1C9B19AE6949AC57C0251
 - 系统还原点依赖「系统保护」开启与 VSS 服务可用；不可用时会在流程中告警并继续（仍保留文件/注册表备份）。
 - Office 等共享型产品键被列为受保护根，不会整根删除，因此这类软件的残留清理偏保守。
 - 驱动归属是启发式打分，阈值 45 分；不确定时宁可漏删，不可误删。
+- **已映射进内核且没有 `DriverUnload` 的驱动，运行期无法安全 unlink**：工具走「禁用启动 + 删服务 + 删文件 + 重启删除」，重启后不再加载；要立即从内存移除只能进 WinPE 离线清理（本工具可生成脚本）。
+- 不实现自写内核驱动篡改 `DriverObject` / 摘内核回调 / 复制 SYSTEM 与 TrustedInstaller 令牌 / BYOVD 漏洞驱动利用：这类做法属于 rootkit 手法，会被 HVCI、PatchGuard、驱动签名与安全软件拦截，且极易蓝屏。
+- ESP 扫描依赖 `mountvol S: /S`（需管理员且可能与其他卷冲突）；Legacy/BIOS 机器会返回「EFI 系统分区未挂载」。
+- `clean-efi.cmd` 删除 `bootmgfw.efi` 后需手动 `bcdboot` 修复引导，脚本只提示不自动执行。
+- WDAC 策略只生成不自动部署：部署前需在测试机确认，避免误拦导致无法启动。
+- SPI 固件 / UEFI 变量级植入（真正 Bootkit）不在工具范围，需刷固件或厂商修复。
 
 
 
@@ -206,7 +221,18 @@ C0D31930FBDD99463F2EB0EF4176595D50569B4141A1C9B19AE6949AC57C0251
 
 ---
 
-## 8. 许可证
+## 7.2 v1.3 变更（2026-11-26，反 Rootkit / 反 Bootkit）
+
+- 新增 `src/Services/AntiRootkit.cs`：
+  - `ScanRootkit`：隐藏服务（Start=4 仍运行）、文件缺失、无签名且不在系统目录、位于 Temp/AppData、非微软签名的 Boot/System 级驱动。
+  - `ScanBootkit`：Secure Boot 状态、`bcdedit /enum all` 非标准 EFI 路径、ESP `\EFI` 下二进制签名校验。
+  - `BuildOfflinePack`：生成 WinPE 离线清理包（服务键备份/禁用/删除、sys 与 DriverStore 删除、EFI 可疑文件备份删除、`bcdboot` 修复提示）。
+  - `BuildWadcDeny`：调用 ConfigCI 生成按哈希 Deny 的 `policy.cip` 与 `deploy-wdac.cmd`。
+- 驱动页新增「反 Rootkit / Bootkit 扫描」入口，详情面板新增「卸载该驱动 / WDAC 拉黑 / 离线清理包」三个按钮。
+- WDAC 生成修正：先把 `AllowAll.xml` 复制到输出目录再 `Merge-CIPolicy`，避免直接读写 `%WINDIR%\schemas` 被拒绝。
+- README 补齐反 Rootkit / Bootkit 能力、已知边界与 v1.3 说明。
+
+---
 
 本项目采用 **BSD 3-Clause License**，全文见仓库根目录 [LICENSE](LICENSE)。
 
