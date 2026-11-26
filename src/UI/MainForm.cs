@@ -132,6 +132,7 @@ namespace MetroUninstaller
         private StartPage _start;
         private MetroPage _current;
         private string _lastLog = "就绪";
+        private bool _signaturePrompted;
 
         public MainForm()
         {
@@ -198,6 +199,17 @@ namespace MetroUninstaller
         {
             base.OnShown(e);
             LayoutUi();
+            if (_signaturePrompted) return;
+            _signaturePrompted = true;
+            try
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    SignatureInfo sig = SignatureVerifier.Check(Application.ExecutablePath);
+                    if (!SigningHelper.IsTrusted(sig)) ShowSigningDialog(_start);
+                });
+            }
+            catch { }
         }
 
         public void Navigate(MetroPage page)
@@ -268,6 +280,131 @@ namespace MetroUninstaller
             t.IsBackground = true;
             t.Name = "inventory-loader";
             t.Start();
+        }
+
+        /// <summary>未签名时的签名 / 测试签名说明与工具包入口。</summary>
+        public void ShowSigningDialog(MetroPage host)
+        {
+            SignatureInfo sig = null;
+            string exe = "";
+            try
+            {
+                exe = Application.ExecutablePath;
+                sig = SignatureVerifier.Check(exe);
+            }
+            catch { }
+            bool trusted = SigningHelper.IsTrusted(sig);
+
+            Overlay ov = new Overlay();
+            ov.Title = trusted ? "代码签名状态" : "当前版本未签名";
+            ov.Subtitle = trusted
+                ? "WinVerifyTrust 校验通过；若仍被拦截，多半是 WDAC 策略只允许特定发布者。"
+                : "Windows 可能直接拦截未签名程序。下面给本机自签名、正式签名和测试签名的区别。";
+            ov.Items = new List<string>
+            {
+                "当前状态：" + SigningHelper.Describe(sig),
+                "程序文件：" + exe,
+                "",
+                "方式 A · 本机自签名（推荐给个人使用）",
+                "点“生成签名工具包” → 右键 make-test-sign.ps1 用 PowerShell 运行",
+                "→ 自动创建自签名证书、信任证书、签出 CHESUNUninstaller-signed.exe",
+                "→ 双击 run-signed.cmd 运行签名副本",
+                "",
+                "方式 B · 正式发布",
+                "购买 OV/EV Authenticode 证书，用 signtool 签原 exe；",
+                "自签名证书只在本机可信，不能拿去给公开发行版签名。",
+                "",
+                "方式 C · 测试签名（testsigning）",
+                "只影响内核驱动的签名校验，不能让未签名 exe 绕过 WDAC；",
+                "工具包里带 enable-testsigning.cmd / disable-testsigning.cmd，仅在测未签名驱动时用。",
+                "",
+                "方式 D · 沙盒",
+                "run-in-sandbox.wsb 内不需要签名，宿主 WDAC 不影响沙盒。",
+                "",
+                "工具包需要 signtool.exe（Windows SDK 的 Code Signing Tools），缺失时脚本会给出下载地址。"
+            };
+            ov.PrimaryText = "生成签名工具包";
+            ov.SecondaryText = "稍后";
+            ov.Primary += delegate
+            {
+                host.Controls.Remove(ov);
+                ov.Dispose();
+                try
+                {
+                    string dir;
+                    SigningHelper.BuildKit(Application.ExecutablePath, out dir);
+                    ShowKitReady(host, dir);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("生成签名工具包失败：\n" + ex.Message, "CHESUN Uninstaller",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            };
+            ov.Secondary += delegate { host.Controls.Remove(ov); ov.Dispose(); };
+            ov.Attach(host);
+        }
+
+        private void ShowKitReady(MetroPage host, string dir)
+        {
+            Overlay ov = new Overlay();
+            ov.Title = "签名工具包已生成";
+            ov.Subtitle = "按 README.txt 三步走；证书只在本机可信";
+            ov.Items = new List<string>
+            {
+                "目录：" + dir,
+                "1. 右键 make-test-sign.ps1 → 使用 PowerShell 运行",
+                "   若提示禁止脚本：Set-ExecutionPolicy -Scope Process Bypass",
+                "2. 脚本自动创建证书、信任、签出 CHESUNUninstaller-signed.exe 并 verify",
+                "3. 双击 run-signed.cmd 启动签名副本",
+                "",
+                "没有 signtool：脚本会提示安装 Windows SDK 的 Code Signing Tools。",
+                "testsigning 只对内核驱动有效，本 exe 仍需要 Authenticode 签名或 WDAC 放行。"
+            };
+            ov.PrimaryText = "打开目录";
+            ov.SecondaryText = "关闭";
+            ov.Primary += delegate { host.Controls.Remove(ov); ov.Dispose(); MainForm.OpenPath(dir); };
+            ov.Secondary += delegate { host.Controls.Remove(ov); ov.Dispose(); };
+            ov.Attach(host);
+        }
+
+        /// <summary>测试签名开关。只影响内核驱动，必须让用户明确知道副作用。</summary>
+        public void ShowTestSigningDialog(MetroPage host)
+        {
+            string state = SigningHelper.TestSigningState();
+            bool on = state == "已启用";
+            Overlay ov = new Overlay();
+            ov.Title = "测试签名（仅内核驱动）";
+            ov.Subtitle = "testsigning 会降低内核安全性，并让桌面显示“测试模式”水印；重启后生效。";
+            ov.Items = new List<string>
+            {
+                "当前状态：" + state,
+                "",
+                "作用：允许加载“测试签名”的内核驱动，用于驱动开发/调试。",
+                "不作用：不会让未签名的用户态 exe 绕过 WDAC / SmartScreen；",
+                "本工具的 exe 仍然需要 Authenticode 签名，或 WDAC 放行、沙盒运行。",
+                "",
+                "启用后 Windows 内核不再强制要求正式驱动签名，恶意驱动也更容易加载；",
+                "仅在自己的测试机、短期调试时使用，用完点“关闭 testsigning”并重启。",
+                "",
+                "需要管理员权限；本程序已提权时可直接执行 bcdedit。"
+            };
+            ov.PrimaryText = on ? "关闭 testsigning" : "启用 testsigning";
+            ov.Danger = !on;
+            ov.SecondaryText = "取消";
+            ov.Primary += delegate
+            {
+                string err = SigningHelper.SetTestSigning(!on);
+                host.Controls.Remove(ov);
+                ov.Dispose();
+                if (err == null)
+                    MessageBox.Show((on ? "已关闭 testsigning。" : "已启用 testsigning。") + "\n重启后生效。",
+                        "CHESUN Uninstaller", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                else
+                    MessageBox.Show("设置失败：\n" + err, "CHESUN Uninstaller", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            };
+            ov.Secondary += delegate { host.Controls.Remove(ov); ov.Dispose(); };
+            ov.Attach(host);
         }
 
         /// <summary>页面内的通用确认覆盖层。</summary>

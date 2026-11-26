@@ -68,6 +68,16 @@ Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两�
 - 白名单：`%LOCALAPPDATA%\CHESUN Uninstaller\whitelist.txt` + 内置规则双层
 - 清理报告：Metro 风格 HTML（概览磁贴、步骤日志、明细表）+ `.txt` 摘要供历史页读取
 
+### 1.6 签名 / 测试签名助手
+
+- 启动时用 `WinVerifyTrust` 检查自身 Authenticode 签名；未签名或证书链不可信时自动弹窗，不阻止继续使用。
+- 弹窗说明四种路径：本机自签名副本、购买正式证书、WinPE/测试签名、Windows Sandbox。
+- **生成签名工具包**：`make-test-sign.ps1`（自签名 + 导入当前用户受信任根/受信任发布者 + 签出 `CHESUNUninstaller-signed.exe` + verify）、`check-signature.ps1`、`run-signed.cmd`、`enable-testsigning.cmd`、`disable-testsigning.cmd`、`README.txt`。
+- 脚本自动请求 UAC；缺 `signtool.exe` 时给出 Windows SDK 下载地址，不自动安装任何东西。
+- 设置页可随时重开「代码签名 / 测试签名」，并可直接启用/关闭 `testsigning`（红色按钮、明确警告）。
+
+**边界**：`testsigning` 只放宽内核驱动签名校验，不能让未签名的用户态 exe 绕过 WDAC / SmartScreen；自签名证书只在本机可信，不能用于公开发行版。
+
 ---
 
 ## 2. 界面
@@ -81,7 +91,7 @@ Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两�
 | 驱动管理 | 全部 / 可疑无签名 / 可归属 三种筛选；行内色块标签（无签名红、受保护灰、归属百分比橙）；详情展示签名、路径、加载级别、状态、四维证据；顶部「反 Rootkit / Bootkit 扫描」，详情底部「卸载该驱动 / WDAC 拉黑 / 离线清理包」 |
 | 扫描历史 | 报告归档，点击用默认浏览器打开 HTML |
 | 系统状态 | 操作系统、权限、还原点状态、备份占用、待重启项 |
-| 设置 | 还原点、备份、保留天数、深度扫描、卸载程序超时、文件数上限（点击切换） |
+| 设置 | 还原点、备份、保留天数、深度扫描、卸载程序超时、文件数上限、代码签名 / 测试签名（点击切换） |
 | 还原点管理 | 创建系统还原点 + 备份列表一键恢复 |
 | 白名单 | 添加 / 移除自定义保护项 |
 
@@ -113,6 +123,7 @@ MetroUninstaller/
    │  ├─ UninstallPipeline.cs     # 一键流程 / 驱动强制清理
    │  ├─ SystemRunner.cs          # SYSTEM 计划任务兜底删除
    │  ├─ AntiRootkit.cs           # Rootkit/Bootkit 扫描、WinPE 离线包、WDAC 策略
+   │  ├─ SigningHelper.cs         # 签名检测、自签名工具包、testsigning 开关
    │  ├─ ReportWriter.cs          # HTML 报告 + 历史摘要
    │  └─ HistoryStore.cs（同文件）
    └─ UI/
@@ -165,7 +176,7 @@ WindowsSandbox.exe .\run-in-sandbox.wsb
 当前构建 SHA256：
 
 ```
-B28119A9AFA0CAD0C776154A780A7C0D10BC2C18CAACE0D855D6FD6DE667996B
+584CF610620B57DEF12E864EA3128D92BA7F21877C88F7728BC40DB9175DC166
 ```
 
 宿主直接运行仍需签名或 WDAC 补充策略放行；沙盒 / 虚拟机内无需放行。
@@ -187,6 +198,8 @@ B28119A9AFA0CAD0C776154A780A7C0D10BC2C18CAACE0D855D6FD6DE667996B
 - `clean-efi.cmd` 删除 `bootmgfw.efi` 后需手动 `bcdboot` 修复引导，脚本只提示不自动执行。
 - WDAC 策略只生成不自动部署：部署前需在测试机确认，避免误拦导致无法启动。
 - SPI 固件 / UEFI 变量级植入（真正 Bootkit）不在工具范围，需刷固件或厂商修复。
+- 当前发布包未做 Authenticode 签名：宿主 WDAC 可能直接拦截。程序只能弹窗并提供自签名工具包，不代替用户签系统级证书，也不会自动安装 Windows SDK。
+- `testsigning` 只用于未签名内核驱动的测试，不能让未签名 exe 过 WDAC；启用后内核签名强制被放宽，测试完应关闭并重启。
 
 
 
@@ -232,6 +245,16 @@ B28119A9AFA0CAD0C776154A780A7C0D10BC2C18CAACE0D855D6FD6DE667996B
 - WDAC 生成修正：先把 `AllowAll.xml` 复制到输出目录再 `Merge-CIPolicy`，避免直接读写 `%WINDIR%\schemas` 被拒绝。
 - 离线脚本修正：从离线 SYSTEM 的 `Select\Current` 推导 `ControlSet00N`，不再硬编码 `ControlSet001`；EFI 清理同时纳入「高 / 中」级 ESP 命中项。
 - README 补齐反 Rootkit / Bootkit 能力、已知边界与 v1.3 说明。
+
+---
+
+## 7.3 v1.4 变更（2026-11-26，签名 / 测试签名助手）
+
+- 新增 `src/Services/SigningHelper.cs`：签名状态描述、`BuildKit` 生成签名工具包、读取与设置 `testsigning`。
+- 启动检测自身签名；未签名 / 证书链不可信时弹出 Metro 覆盖层，列出本机自签名、正式证书、测试签名、沙盒四条路径。
+- 签名工具包：`make-test-sign.ps1` 自动请求 UAC、创建自签名代码签名证书、导入当前用户受信任根/受信任发布者、签出签名副本并 `signtool verify`；同时提供 `check-signature.ps1`、`run-signed.cmd`、`enable-testsigning.cmd`、`disable-testsigning.cmd`、`README.txt`。
+- 设置页新增「代码签名 / 测试签名」与「测试签名（仅内核驱动）」两行；后者可直接启用/关闭 `testsigning`，启用按钮为红色并写明副作用。
+- 明确边界：`testsigning` 只影响内核驱动，不能放行未签名用户态 exe；自签名证书只在本机可信。
 
 ---
 

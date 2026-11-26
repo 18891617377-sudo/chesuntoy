@@ -395,6 +395,24 @@ namespace MetroUninstaller
                 },
                 GlyphKind.Driver, Theme.Red);
 
+            Add("代码签名 / 测试签名",
+                delegate
+                {
+                    try
+                    {
+                        SignatureInfo sig = SignatureVerifier.Check(Application.ExecutablePath);
+                        return SigningHelper.IsTrusted(sig) ? "已签名" : "未签名";
+                    }
+                    catch { return "未知"; }
+                },
+                delegate { Main.ShowSigningDialog(this); },
+                GlyphKind.Status, Theme.Accent);
+
+            Add("测试签名（仅内核驱动）",
+                delegate { return SigningHelper.TestSigningState(); },
+                delegate { Main.ShowTestSigningDialog(this); },
+                GlyphKind.Driver, Theme.Orange);
+
             _list.ResumeLayout();
             LayoutRows();
         }
