@@ -18,8 +18,10 @@ namespace MetroUninstaller
             r.AppName = app.Name;
             r.AppPublisher = app.Publisher;
             r.Elevated = Admin.IsAdmin;
+            r.CacheOnly = app.SystemComponent;
             r.Items = items;
             r.Drivers = drivers;
+            if (app.SystemComponent) runUninstaller = false;
 
             Action<string> L = delegate (string m)
             {
@@ -48,22 +50,33 @@ namespace MetroUninstaller
                 L("跳过还原点：需要管理员权限。");
             }
 
-            // 2. 终止进程
-            L("正在扫描关联进程…");
-            List<ProcessHit> procs = ProcessTools.FindRelated(app);
-            if (procs.Count == 0) L("未发现关联进程。");
+            // 2. 终止进程（系统组件模式不主动杀浏览器，避免用户丢未保存内容）
+            if (app.SystemComponent)
+            {
+                L("系统组件模式：不终止浏览器进程；缓存被占用时会登记重启删除。");
+            }
             else
             {
-                L("发现 " + procs.Count + " 个关联进程，正在终止…");
-                ProcessTools.KillAll(procs, L);
+                L("正在扫描关联进程…");
+                List<ProcessHit> procs = ProcessTools.FindRelated(app);
+                if (procs.Count == 0) L("未发现关联进程。");
+                else
+                {
+                    L("发现 " + procs.Count + " 个关联进程，正在终止…");
+                    ProcessTools.KillAll(procs, L);
+                }
             }
             Thread.Sleep(500);
 
-            // 3. 卸载主程序
-            if (runUninstaller)
+            // 3. 卸载主程序（系统组件永远不执行整包卸载）
+            if (runUninstaller && !app.SystemComponent)
             {
                 L("正在执行卸载程序…");
                 RunUninstaller(app, L);
+            }
+            else if (app.SystemComponent)
+            {
+                L("系统组件模式：跳过官方卸载程序，只清理缓存。");
             }
             else L("已跳过卸载程序，直接进入残留清理。");
 
@@ -85,12 +98,26 @@ namespace MetroUninstaller
             foreach (ResidueItem it in OrderItems(items))
             {
                 if (it.Protected || !it.Selected) continue;
+                if ((it.Kind == "file" || it.Kind == "dir" || it.Kind == "shortcut") &&
+                    SafetyGuard.IsProtectedPath(it.Target))
+                {
+                    L("跳过受保护路径：" + it.Target);
+                    continue;
+                }
                 index++;
-                if (it.RestartRequired) r.PendingRestart++;
-                if (session != null) BackupService.BackupItem(session, it, null);
+                if (session != null && !it.BestEffort) BackupService.BackupItem(session, it, null);
 
-                if (DeleteItem(it, L)) { CountDeleted(it, r); }
-                else if (it.RestartRequired) { r.PendingRestart++; }
+                bool ok = DeleteItem(it, L);
+                if (ok)
+                {
+                    if (!it.BestEffort && it.RestartRequired) r.PendingRestart++;
+                    CountDeleted(it, r);
+                }
+                else if (it.BestEffort)
+                {
+                    L("缓存仍被浏览器占用，已跳过（不登记重启删除）：" + it.Target);
+                }
+                else if (it.RestartRequired) r.PendingRestart++;
                 else r.Failed++;
 
                 if (index % 50 == 0) L("已处理 " + index + " / " + total + " 项…");
@@ -163,8 +190,8 @@ namespace MetroUninstaller
             return it;
         }
 
-        /// <summary>独立驱动清理（驱动管理页使用）。</summary>
-        public static CleanReport CleanDrivers(List<DriverInfo> drivers, Action<string> uiLog)
+        /// <summary>独立驱动清理（驱动管理页使用）。forceSuspicious=true 时允许清理无归属的可疑驱动。</summary>
+        public static CleanReport CleanDrivers(List<DriverInfo> drivers, Action<string> uiLog, bool forceSuspicious = false)
         {
             CleanReport r = new CleanReport();
             r.AppName = "内核驱动清理";
@@ -203,7 +230,7 @@ namespace MetroUninstaller
                     L("跳过受保护驱动 " + d.ServiceName);
                     continue;
                 }
-                if (!DriverInventory.IsDeletable(d))
+                if (!DriverInventory.IsDeletable(d) && !(forceSuspicious && DriverInventory.IsSuspiciousDeletable(d)))
                 {
                     L("跳过归属不明确的驱动 " + d.ServiceName + "（归属分 " + d.Attribution + "）");
                     continue;
@@ -286,7 +313,17 @@ namespace MetroUninstaller
                                 }
                                 catch { }
                             }
+                            if (Admin.IsAdmin && SystemRunner.ForceDeleteAsTrustedInstaller(it.Target, false))
+                            {
+                                L("已用 TrustedInstaller 令牌删除文件 " + it.Target);
+                                return true;
+                            }
                             it.RestartRequired = true;
+                            if (it.BestEffort)
+                            {
+                                L("缓存文件被占用，跳过：" + it.Target);
+                                return false;
+                            }
                             if (PendingDelete.Schedule(it.Target))
                             {
                                 L("文件被占用，已登记重启后删除 " + it.Target);
@@ -298,6 +335,7 @@ namespace MetroUninstaller
 
                     case "dir":
                         if (!Directory.Exists(it.Target)) return true;
+                        if (it.BestEffort) return DeleteCacheBestEffort(it.Target, L);
                         try
                         {
                             Directory.Delete(it.Target, true);
@@ -318,6 +356,11 @@ namespace MetroUninstaller
                                     return true;
                                 }
                                 catch { }
+                            }
+                            if (Admin.IsAdmin && SystemRunner.ForceDeleteAsTrustedInstaller(it.Target, true))
+                            {
+                                L("已用 TrustedInstaller 令牌删除目录 " + it.Target);
+                                return true;
                             }
                             int pending = ScheduleDirectoryLeftovers(it.Target);
                             if (pending > 0)
@@ -407,6 +450,49 @@ namespace MetroUninstaller
             }
         }
 
+        /// <summary>缓存目录：尽力删除，失败的留在磁盘，绝不登记重启删除。</summary>
+        private static bool DeleteCacheBestEffort(string dir, Action<string> L)
+        {
+            if (!Directory.Exists(dir)) return true;
+            try
+            {
+                ClearReadOnly(dir);
+                Directory.Delete(dir, true);
+                L("已清理缓存目录 " + dir);
+                return true;
+            }
+            catch { }
+
+            int failed = 0;
+            try
+            {
+                foreach (string f in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
+                {
+                    try
+                    {
+                        File.SetAttributes(f, FileAttributes.Normal);
+                        File.Delete(f);
+                    }
+                    catch { failed++; }
+                }
+                foreach (string d in Directory.GetDirectories(dir, "*", SearchOption.AllDirectories))
+                {
+                    try { if (Directory.GetFileSystemEntries(d).Length == 0) Directory.Delete(d, false); }
+                    catch { }
+                }
+                try { Directory.Delete(dir, false); } catch { }
+            }
+            catch { failed++; }
+
+            if (failed == 0 && !Directory.Exists(dir))
+            {
+                L("已清理缓存目录 " + dir);
+                return true;
+            }
+            L("缓存目录部分被占用，已跳过剩余 " + failed + " 个文件：" + dir);
+            return false;
+        }
+
         private static int ScheduleDirectoryLeftovers(string dir)
         {
             int n = 0;
@@ -494,12 +580,28 @@ namespace MetroUninstaller
                 d.State.IndexOf("RUN", StringComparison.OrdinalIgnoreCase) >= 0)
                 L("检测到该驱动正在内核中加载，先禁用启动并尝试热停止；不支持 unload 的驱动将在重启时完成文件删除。");
 
-            bool serviceOk = DeleteService(d.ServiceName, L);
-            if (!serviceOk && Admin.IsAdmin)
+            if (!string.IsNullOrEmpty(d.ServiceName) && KernelDriverClient.IsAvailable)
             {
-                string so;
-                if (SystemRunner.DeleteServiceAsSystem(d.ServiceName, out so))
-                    L("已由 SYSTEM 权限删除服务 " + d.ServiceName + " — " + so);
+                string kerr;
+                if (KernelDriverClient.TryUnload(d.ServiceName, out kerr))
+                    L("已通过反 Rootkit 驱动调用 ZwUnloadDriver 卸载 " + d.ServiceName);
+                else L("反 Rootkit 驱动无法热卸载 " + d.ServiceName + "：" + kerr + "（转入服务停止/重启删除）");
+            }
+
+            bool serviceOk = true;
+            if (!string.IsNullOrEmpty(d.ServiceName))
+            {
+                serviceOk = DeleteService(d.ServiceName, L);
+                if (!serviceOk && Admin.IsAdmin)
+                {
+                    string so;
+                    if (SystemRunner.DeleteServiceAsSystem(d.ServiceName, out so))
+                        L("已由 SYSTEM 权限删除服务 " + d.ServiceName + " — " + so);
+                }
+            }
+            else
+            {
+                L("该模块没有服务注册项，直接处理驱动文件；重启后删除，避免内核镜像占用。");
             }
 
             bool fileOk = true;
@@ -514,13 +616,26 @@ namespace MetroUninstaller
                 catch (Exception ex)
                 {
                     L("直接删除被拒绝（" + ex.Message + "），改用 SYSTEM 接管所有权…");
-                    if (Admin.IsAdmin && SystemRunner.ForceDelete(d.ResolvedPath, false))
+                    string kfile = "";
+                    bool kernelDeleted = KernelDriverClient.IsAvailable &&
+                        KernelDriverClient.TryDeleteFile(@"\??\" + d.ResolvedPath, out kfile);
+                    if (kernelDeleted)
                     {
-                        L("已由 SYSTEM 强制删除驱动文件 " + d.ResolvedPath);
+                        L("已通过反 Rootkit 驱动删除驱动文件 " + d.ResolvedPath);
                     }
-                    else if (PendingDelete.Schedule(d.ResolvedPath))
-                        L("驱动文件仍被内核占用，已登记重启后删除 " + d.ResolvedPath);
-                    else { fileOk = false; L("错误：驱动文件删除失败 " + d.ResolvedPath); }
+                    else if (kfile.Length > 0)
+                        L("反 Rootkit 驱动删文件未成功：" + kfile);
+
+                    if (!kernelDeleted)
+                    {
+                        if (Admin.IsAdmin && SystemRunner.ForceDelete(d.ResolvedPath, false))
+                            L("已由 SYSTEM 强制删除驱动文件 " + d.ResolvedPath);
+                        else if (Admin.IsAdmin && SystemRunner.ForceDeleteAsTrustedInstaller(d.ResolvedPath, false))
+                            L("已用 TrustedInstaller 令牌删除驱动文件 " + d.ResolvedPath);
+                        else if (PendingDelete.Schedule(d.ResolvedPath))
+                            L("驱动文件仍被内核占用，已登记重启后删除 " + d.ResolvedPath);
+                        else { fileOk = false; L("错误：驱动文件删除失败 " + d.ResolvedPath); }
+                    }
                 }
             }
 
@@ -537,11 +652,17 @@ namespace MetroUninstaller
                 }
             }
 
-            Reg.DeleteKey(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\" + d.ServiceName, null);
-            if (Reg.Exists(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\" + d.ServiceName) && Admin.IsAdmin)
+            if (!string.IsNullOrEmpty(d.ServiceName))
             {
-                string regOut;
-                SystemRunner.Run("reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\" + d.ServiceName + "\" /f", 60000, out regOut);
+                Reg.DeleteKey(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\" + d.ServiceName, null);
+                if (Reg.Exists(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\" + d.ServiceName) && Admin.IsAdmin)
+                {
+                    string regOut;
+                    SystemRunner.Run("reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\" + d.ServiceName + "\" /f", 60000, out regOut);
+                    if (Reg.Exists(@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\" + d.ServiceName))
+                        SystemRunner.DeleteRegistryAsTrustedInstaller(
+                            @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\" + d.ServiceName);
+                }
             }
 
             return serviceOk || fileOk;

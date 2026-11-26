@@ -36,6 +36,13 @@ namespace MetroUninstaller
                             d.Description = SoftwareInventory.AsString(k.GetValue("Description"));
                             d.ImagePathRaw = SoftwareInventory.AsString(k.GetValue("ImagePath"));
                             d.ResolvedPath = ResolveImagePath(d.ImagePathRaw);
+                            if (string.IsNullOrEmpty(d.ResolvedPath))
+                            {
+                                // 内置驱动（Null / Beep 等）没有 ImagePath，按服务名推断标准路径。
+                                string guess = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                                    @"System32\drivers\" + name + ".sys");
+                                if (File.Exists(guess)) d.ResolvedPath = guess;
+                            }
                             d.State = states.ContainsKey(name.ToLowerInvariant()) ? states[name.ToLowerInvariant()] : "stopped";
                             d.ParametersText = ReadParameters(k);
 
@@ -64,13 +71,54 @@ namespace MetroUninstaller
                 d.SignatureState = sig.State;
                 d.Signer = sig.Signer;
                 d.MicrosoftSigned = sig.MicrosoftSigned;
+                d.Suspicious = (sig.State == "unsigned" || sig.State == "invalid" || sig.State == "missing");
                 d.IsProtected = SafetyGuard.IsDriverProtected(d);
-                d.Suspicious = (sig.State == "unsigned" || sig.State == "invalid")
-                    && !IsTrustedLocation(d.ResolvedPath);
             });
 
             if (progress != null) progress("驱动清单就绪：" + list.Count + " 项");
+            AddLoadedOnlyDrivers(list);
             return list;
+        }
+
+        /// <summary>把“已加载但没有服务注册”的无签名模块补进列表，供显式隔离。</summary>
+        private static void AddLoadedOnlyDrivers(List<DriverInfo> list)
+        {
+            try
+            {
+                HashSet<string> known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (DriverInfo d in list)
+                    if (!string.IsNullOrEmpty(d.ResolvedPath)) known.Add(d.ResolvedPath);
+
+                foreach (string raw in AntiRootkit.LoadedModulePaths())
+                {
+                    string path = ResolveImagePath(raw);
+                    if (string.IsNullOrEmpty(path) || known.Contains(path) || !File.Exists(path)) continue;
+                    SignatureInfo sig = SignatureVerifier.Check(path);
+                    if (sig.State != "unsigned" && sig.State != "invalid") continue;
+
+                    DriverInfo d = new DriverInfo();
+                    d.ServiceName = "";
+                    d.DisplayName = "隐藏模块 " + Path.GetFileName(path);
+                    d.Description = "已加载到内核，但没有对应的 Services 注册项";
+                    d.ImagePathRaw = path;
+                    d.ResolvedPath = path;
+                    d.State = "已加载 · 无服务注册";
+                    d.StartType = 4;
+                    d.Type = 1;
+                    d.SignatureState = sig.State;
+                    d.Signer = sig.Signer;
+                    d.MicrosoftSigned = sig.MicrosoftSigned;
+                    d.Suspicious = true;
+                    d.IsProtected = false;
+                    d.Attribution = 100;
+                    d.OwnerSoftware = "隐藏内核模块";
+                    d.Evidence.Add("NtQuerySystemInformation 枚举到已加载模块");
+                    d.Evidence.Add("Services 注册表中没有对应服务");
+                    known.Add(path);
+                    list.Add(d);
+                }
+            }
+            catch (Exception ex) { Log.Warn("补充隐藏模块失败：" + ex.Message); }
         }
 
         private static bool IsTrustedLocation(string path)
@@ -244,6 +292,12 @@ namespace MetroUninstaller
         public static bool IsDeletable(DriverInfo d)
         {
             return d != null && !d.IsProtected && d.Attribution >= 45;
+        }
+
+        /// <summary>可疑驱动的显式清理：无签名/签名无效/文件缺失，且未被系统关键服务锁死。</summary>
+        public static bool IsSuspiciousDeletable(DriverInfo d)
+        {
+            return d != null && !d.IsProtected && d.Suspicious;
         }
     }
 }

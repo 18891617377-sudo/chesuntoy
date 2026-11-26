@@ -40,7 +40,7 @@ Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两�
   | 服务名包含软件名 | +8 |
 - 只有 **归属 ≥ 45 且未被保护** 的驱动才进入可删除列表；30–44 只展示为「疑似」。
 - **安全红线（硬编码，优先于一切）**
-  - Windows 目录下任何驱动、`System32\drivers`、DriverStore → 受保护
+  - Windows 目录下的驱动默认受保护；但 `unsigned` / `invalid` / `missing` 的可疑驱动经“可疑驱动”显式确认后可清理（仍不会碰关键服务名、Microsoft 签名、非可疑 Boot/System 级、用户白名单）
   - 关键系统驱动服务名清单（disk / ntfs / tcpip / fltmgr / volsnap / wdf01000 …）
   - Microsoft 签名、Boot/System 级驱动、用户白名单
   - 安装目录过于宽泛（盘符根、`Program Files`、`Windows`、用户目录）时，直接跳过文件扫描与「服务程序位于安装目录」判定
@@ -50,10 +50,13 @@ Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两�
 
 ### 1.3 反 Rootkit / 反 Bootkit
 
-- **Rootkit 启发式扫描**：服务存在但驱动文件缺失、无签名且不在系统目录、`Start=4` 却仍在运行（隐藏服务）、文件位于 Temp / Downloads / AppData、非微软签名的 Boot/System 级驱动；输出高危 / 可疑分级清单。
-- **已加载内核模块枚举**：`NtQuerySystemInformation(SystemModuleInformation)` 取全部已加载内核模块（含完整路径），与 `Services` 注册表比对；已加载但无服务注册、且签名不可信或位于 Windows 目录外的模块单独标记，用于发现删了服务键但仍在内存里的隐藏驱动。
-- **Bootkit 扫描**：读取 Secure Boot 状态，解析 `bcdedit /enum all` 中的非标准 `.efi` 加载路径（带启动项 GUID）；`mountvol S: /S` 挂载 ESP 后遍历整块 ESP 的 `.efi/.exe/.dll`，逐个校验签名，非微软签名项标红，`finally` 卸载 ESP。
-- **WinPE 离线清理包**：一键生成 `clean-driver.cmd` + `clean-efi.cmd` +（有非标准 BCD 项时）`clean-bcd.cmd` + `README.txt`。离线挂载 SYSTEM 注册表 → 备份 → 禁用并删除服务键 → 删除 `System32\drivers\*.sys` → 删除 DriverStore 包；`clean-efi.cmd D:\` 先备份再删除可疑引导组件；BCD 部分先 `/export` 备份，再按 GUID 删除非标准启动项，并提示用 `bcdboot` 修复引导。在 WinPE / 微 PE 下原系统内核不运行，可彻底绕过运行中驱动无法卸载的限制。
+- **Rootkit 启发式扫描**：服务存在但驱动文件缺失、无签名/签名无效且不在可信目录、`Start=4` 却仍在运行（隐藏服务）、文件位于 Temp / Downloads / AppData、非 Microsoft 签名的 Boot/System 级驱动；输出高危 / 可疑分级清单。
+- **签名校验含目录签名**：除 `WinVerifyTrust(WTD_CHOICE_FILE)` 外，新增 `CryptCATAdmin*` 查询 catalog（cat）签名。Windows 自带驱动大量是目录签名，只查嵌入签名会误判为 unsigned；无权限查 cat 时状态为 `unknown`，不误报。
+- **已加载内核模块枚举**：`NtQuerySystemInformation(SystemModuleInformation)` 取全部已加载内核模块（含完整路径），与 `Services` 注册表比对；已加载但无服务注册、且签名不可信或位于 Windows 目录外的模块单独标记，用于发现删了服务键但仍在内存里的隐藏驱动。无服务注册的隐藏模块也可以直接进入“可疑驱动”清理。
+- **独立反 Rootkit 驱动（可选）**：`driver\chesunark.c` 是一个独立签名的内核驱动，只调用 `ZwUnloadDriver` / `ZwDeleteKey` / `ZwDeleteFile`。安装后，程序优先通过它热卸载有 `DriverUnload` 的 rootkit 驱动；没有 `DriverUnload` 的驱动仍转“禁用服务 + 重启删除”。
+- **TrustedInstaller 令牌兜底**：文件/目录在 `takeown` + `icacls` 后仍被拒绝时，复制正在运行的 `TrustedInstaller.exe` 令牌并冒充删除；不“凭空铸造”SYSTEM，只对非保护路径生效。
+- **Bootkit 扫描**：读取 Secure Boot 状态，解析 `bcdedit /enum all` 中的非标准 `.efi` 加载路径（带启动项 GUID；中英文 BCD 字段都解析）；`mountvol S: /S` 挂载 ESP 后遍历整块 ESP 的 `.efi/.exe/.dll`，逐个校验签名，非 Microsoft 签名项标红，并统计非标准路径项，`finally` 卸载 ESP。
+- **WinPE 离线清理包**：一键生成 `clean-driver.cmd` + `clean-efi.cmd` +（有非标准 BCD 项时）`clean-bcd.cmd` + `README.txt`。离线挂载 SYSTEM 注册表 → 备份 → 禁用并删除服务键 → 删除 `System32\drivers\*.sys` → 删除 DriverStore 包；`clean-efi.cmd D:\` 先备份再删除可疑引导组件；BCD 部分先 `/export` 备份，再按 GUID 删除非标准启动项，并提示用 `bcdboot` 修复引导。无服务名的隐藏模块不会误删整个 `Services` 键。在 WinPE / 微 PE 下原系统内核不运行，可彻底绕过运行中驱动无法卸载的限制。
 - **WDAC 按哈希拉黑**：调用系统自带 ConfigCI（`New-CIPolicyRule -Level Hash -DriverFilePath ... -Deny`），以 `AllowAll.xml` 为底合并，生成 `policy.cip` + `deploy-wdac.cmd`。部署后该驱动文件哈希被内核拒绝加载，重启即失效；脚本不自动部署，避免误拦导致无法启动。
 
 ### 1.4 一键全流程
@@ -66,6 +69,8 @@ Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两�
 - 删除前备份：文件复制 + `reg export`，默认保留 7 天，可在「还原点管理」页一键恢复
 - 备份上限：单文件 256 MB、单次 2 GB，超出则记录「跳过备份」并继续
 - 待重启删除项统计（`PendingFileRenameOperations`）
+- **缓存不登记重启删除**：Edge / WebView2 这类系统组件的缓存清理用 `BestEffort`，删不掉就跳过，不写 `PendingFileRenameOperations`，避免再次产生 900+ 待重启项
+- **TrustedInstaller 删除兜底**：`takeown` + `icacls` 仍失败时，尝试复制正在运行的 `TrustedInstaller.exe` 令牌并冒充删除；不碰 `SafetyGuard` 保护路径
 - 白名单：`%LOCALAPPDATA%\CHESUN Uninstaller\whitelist.txt` + 内置规则双层
 - 清理报告：Metro 风格 HTML（概览磁贴、步骤日志、明细表）+ `.txt` 摘要供历史页读取
 
@@ -76,6 +81,11 @@ Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两�
 - **生成签名工具包**：`make-test-sign.ps1`（自签名 + 导入当前用户受信任根/受信任发布者 + 签出 `CHESUNUninstaller-signed.exe` + verify）、`check-signature.ps1`、`run-signed.cmd`、`enable-testsigning.cmd`、`disable-testsigning.cmd`、`README.txt`。
 - 脚本自动请求 UAC；缺 `signtool.exe` 时给出 Windows SDK 下载地址，不自动安装任何东西。
 - 设置页可随时重开「代码签名 / 测试签名」，并可直接启用/关闭 `testsigning`（红色按钮、明确警告）。
+- **独立反 Rootkit 驱动签名**：设置页新增「反 Rootkit 驱动签名」。点开后选择 `chesunark.sys`，生成 `DriverKits\<名字>_<时间>\`：
+  - `make-test-sign-driver.ps1` 自动 UAC、建本机测试证书、导入 `LocalMachine\Root` / `TrustedPublisher`、`signtool sign` + `verify`；
+  - `enable-testsigning.cmd` / `disable-testsigning.cmd` / `install-driver.cmd` / `uninstall-driver.cmd`；
+  - `chesunark-unsigned.sys`、驱动源码（若发布包带 `driver\`）、`README.txt`。
+  - 明确写明：这不是给 `CHESUNUninstaller.exe` 签名，是给独立的内核驱动签名；自签名只在本机测试有效。
 
 **边界**：`testsigning` 只放宽内核驱动签名校验，不能让未签名的用户态 exe 绕过 WDAC / SmartScreen；自签名证书只在本机可信，不能用于公开发行版。
 
@@ -108,6 +118,11 @@ MetroUninstaller/
 ├─ build.ps1                      # csc 一键编译
 ├─ CHESUNUninstaller.exe           # 已编译产物
 ├─ README.md
+├─ driver/
+│  ├─ chesunark.c                 # 独立反 Rootkit 驱动源码
+│  ├─ chesunark.inf               # INF
+│  ├─ build-driver.ps1            # WDK 构建脚本
+│  └─ README.md
 └─ src/
    ├─ Program.cs                  # 入口、DPI、单实例、全局异常
    ├─ Theme.cs                    # Metro 色板、字体缓存、几何图标、DPI 缩放
@@ -116,15 +131,16 @@ MetroUninstaller/
    │  ├─ SoftwareInventory.cs     # 已安装软件清单
    │  ├─ ProcessTools.cs          # 关联进程与进程树终止
    │  ├─ ResidueScanner.cs        # 文件/注册表/服务/任务/快捷方式/COM 扫描
-   │  ├─ SignatureVerifier.cs     # WinVerifyTrust + 证书主体
+   │  ├─ SignatureVerifier.cs     # WinVerifyTrust + 目录签名 + 证书主体
    │  ├─ DriverInventory.cs       # 驱动枚举、四维归属、可删判定
    │  ├─ SafetyGuard.cs           # 系统保护、厂商根、白名单、安全目录判定
    │  ├─ BackupService.cs         # 备份清单/恢复/过期清理（含 RestorePointService 还原点）
    │  ├─ Executor.cs              # 外部命令、注册表操作、重启删除
    │  ├─ UninstallPipeline.cs     # 一键流程 / 驱动强制清理
-   │  ├─ SystemRunner.cs          # SYSTEM 计划任务兜底删除
+   │  ├─ SystemRunner.cs          # SYSTEM 计划任务 / TrustedInstaller 令牌兜底删除
+   │  ├─ KernelDriverClient.cs    # 与 chesunark.sys 的 IOCTL 通信
    │  ├─ AntiRootkit.cs           # Rootkit/Bootkit 扫描、WinPE 离线包、WDAC 策略
-   │  ├─ SigningHelper.cs         # 签名检测、自签名工具包、testsigning 开关
+   │  ├─ SigningHelper.cs         # 签名检测、自签名工具包、驱动签名工具包、testsigning 开关
    │  ├─ ReportWriter.cs          # HTML 报告 + 历史摘要
    │  └─ HistoryStore.cs（同文件）
    └─ UI/
@@ -180,6 +196,12 @@ WindowsSandbox.exe .\run-in-sandbox.wsb
 13CA09A02B57B1EDAA407B3E7DFA7F9860000460AC1112D7A3032E4CECD656CD
 ```
 
+v1.5.1 构建（`build157`，244224 B）：
+
+```
+BCF889AA2C26917B81B7EE35B09E7D11A98ED89EB5E73A6A583359A8BEA5D31F
+```
+
 宿主直接运行仍需签名或 WDAC 补充策略放行；沙盒 / 虚拟机内无需放行。
 
 ---
@@ -187,14 +209,15 @@ WindowsSandbox.exe .\run-in-sandbox.wsb
 ## 6. 已知边界
 
 - 不处理 MSIX / AppX 商店应用（只覆盖 Win32 卸载项）。
-- WHQL 目录签名（catalog 签名）未做 catalog 校验；对无嵌入签名的系统驱动，靠「Windows 目录 + 关键服务名 + Boot/System 级」三层保护兜底。
+- WHQL 目录签名（catalog 签名）已在管理员进程下用 `CryptCATAdmin*` 查询；非管理员查询返回 Access Denied 时状态为 `unknown`，不会被误报成无签名。
 - 卸载程序若是交互式 GUI 且无静默参数，会等待用户操作，默认 600 秒超时后强制结束并继续清理。
 - 计划任务按 `Tasks` 目录中的相对名称调用 `schtasks /delete`，个别系统任务可能受权限限制。
 - 系统还原点依赖「系统保护」开启与 VSS 服务可用；不可用时会在流程中告警并继续（仍保留文件/注册表备份）。
 - Office 等共享型产品键被列为受保护根，不会整根删除，因此这类软件的残留清理偏保守。
 - 驱动归属是启发式打分，阈值 45 分；不确定时宁可漏删，不可误删。
 - **已映射进内核且没有 `DriverUnload` 的驱动，运行期无法安全 unlink**：工具走「禁用启动 + 删服务 + 删文件 + 重启删除」，重启后不再加载；要立即从内存移除只能进 WinPE 离线清理（本工具可生成脚本）。
-- 不实现自写内核驱动篡改 `DriverObject` / 摘内核回调 / 复制 SYSTEM 与 TrustedInstaller 令牌 / BYOVD 漏洞驱动利用：这类做法属于 rootkit 手法，会被 HVCI、PatchGuard、驱动签名与安全软件拦截，且极易蓝屏。
+- **独立驱动 `chesunark.sys` 只做文档化 API**：`ZwUnloadDriver` / `ZwDeleteKey` / `ZwDeleteFile`；不摘内核对象、不改 SSDT/回调、不绕 PatchGuard。它不能热卸载没有 `DriverUnload` 的 rootkit，也不能删 ESP 里的 bootkit。
+- `TrustedInstaller` 令牌删除依赖系统里有一个可复制的 `TrustedInstaller.exe` 进程；若被策略阻止或进程无法启动，会退回 SYSTEM / 重启删除。非管理员无法验证这条路径。
 - ESP 扫描依赖 `mountvol S: /S`（需管理员且可能与其他卷冲突）；Legacy/BIOS 机器会返回「EFI 系统分区未挂载」。
 - `clean-efi.cmd` 删除 `bootmgfw.efi` 后需手动 `bcdboot` 修复引导，脚本只提示不自动执行。
 - WDAC 策略只生成不自动部署：部署前需在测试机确认，避免误拦导致无法启动。
@@ -264,7 +287,25 @@ WindowsSandbox.exe .\run-in-sandbox.wsb
 - `ScanLoadedModules`：用 `NtQuerySystemInformation(SystemModuleInformation)` 枚举已加载内核模块（含完整路径），与驱动服务表交叉比对，发现“服务键已删但仍在内存运行”的隐藏驱动；非可信签名标红，Windows 目录外的有效签名驱动标为待确认。
 - `ScanBootkit`：ESP 改为遍历整块分区（不再只看 `\EFI`）；BCD 非标准 `.efi` 路径带上启动项 GUID。
 - `BuildOfflinePack`：新增 `clean-bcd.cmd`（有非标准 BCD 项时生成），先 `bcdedit /export` 备份，再按 GUID 删除，最后提示 `bcdboot` 修复；EFI 路径解析改为按 `ESP:` 标记截取，支持带空格的路径。
-- 仍不实现：运行期无 `DriverUnload` 驱动的安全 unlink、内核回调/SSDT 摘除、复制 SYSTEM/TrustedInstaller 令牌、BYOVD。上述属于内核 rootkit 手法，HVCI/PatchGuard/签名策略会拦，且蓝屏风险极高。
+- 仍不实现：运行期无 `DriverUnload` 驱动的安全 unlink、内核回调/SSDT 摘除、BYOVD、伪造/凭空铸造 SYSTEM 令牌。TrustedInstaller 只复用系统中正在运行的官方进程令牌，不创建新令牌；上述内核 rootkit 手法会被 HVCI/PatchGuard/签名策略拦截，且蓝屏风险极高。
+
+---
+
+## 7.5 v1.5.1 变更（2026-11-26，系统组件保护 / 反 Rootkit 驱动）
+
+- **Edge / EdgeUpdate / WebView2 识别为系统组件**：软件清单加载后按名称与路径标记 `SystemComponent`，列表显示“系统组件”，选中后按钮变为“查看缓存 / 仅清理缓存”，不再走整包卸载。
+- **只清可再生缓存**：`%LOCALAPPDATA%\Microsoft\Edge\User Data\Default\{Cache,Code Cache,GPUCache,ShaderCache,GrShaderCache,Service Worker\CacheStorage,ScriptCache}`、`EdgeUpdate\{Download,Install}`、漫游 `Cache`；不碰安装目录、书签、密码、WebView2。
+- **932 项待重启修复**：缓存项标 `BestEffort`，删除失败只记“缓存仍被占用，已跳过”，不写 `PendingFileRenameOperations`；备份也跳过缓存项，避免把上百 MB 缓存复制进备份。
+- **签名校验修复**：新增 cat 目录签名查询。此前 `Null.SYS` / `portcls.sys` / `win32kbase.sys` 被误判 `unsigned`；现在管理员下能识别 Microsoft 目录签名，非管理员无权限时回退 `unknown`，不再产生 14 条系统文件高危误报。
+- **可疑驱动清理**：`DriverInventory` 全量标记 unsigned/invalid/missing；`SafetyGuard.IsDriverProtected` 允许可疑驱动显式清理；`PagesDriver` 的“卸载该驱动”按钮对可疑驱动启用；无服务注册的隐藏模块也有独立清理路径，且不会误删整个 `Services` 键。
+- **独立反 Rootkit 驱动**：新增 `driver\chesunark.c` / `chesunark.inf` / `build-driver.ps1`，以及 `src\Services\KernelDriverClient.cs`（设备 `\\.\ChesunArk`，IOCTL 0x800/0x801/0x802）。驱动只做 `ZwUnloadDriver` / `ZwDeleteKey` / `ZwDeleteFile`。
+- **驱动签名工具包**：设置页“反 Rootkit 驱动签名”选择 `.sys` 后生成 `DriverKits\...`，含自动测试签名脚本、testsigning 开关、`sc create` 安装/卸载脚本；不是给主程序 exe 签名。
+- **TrustedInstaller 令牌兜底**：`SystemRunner` 复制 `TrustedInstaller.exe` 令牌并冒充，`takeown`/`icacls` 仍删不掉时使用；只对非保护路径生效。
+- **验证记录**：
+  - Edge 扫描实测只产生 6 个缓存目录、0 个安装目录项，全部 `BestEffort=True`。
+  - 非管理员反 Rootkit 基线：450 个驱动、261 个已加载模块、隐藏模块 51 个、命中可疑 0 个；系统目录签名误报从 14 降到 0。
+  - 本机无 WDK，`chesunark.sys` 只提供源码与构建脚本，未预编译；驱动实际热卸载需在装有 WDK + 测试签名的机器上验证。
+  - 宿主 WDAC 拦截未签名 exe，沙盒本轮持续“远程环境正在注销”，GUI 与提权令牌路径未完成实测。
 
 ---
 

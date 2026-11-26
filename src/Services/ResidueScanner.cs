@@ -13,6 +13,9 @@ namespace MetroUninstaller
     {
         public static List<ResidueItem> Scan(InstalledApp app, Action<string> progress)
         {
+            if (app.SystemComponent)
+                return ScanSystemCaches(app, progress);
+
             List<ResidueItem> items = new List<ResidueItem>();
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -47,13 +50,55 @@ namespace MetroUninstaller
             return items;
         }
 
+        /// <summary>
+        /// Edge / WebView2 只清可再生缓存：不碰 Program Files、不碰书签/密码、不碰安装注册项。
+        /// 这些缓存目录被浏览器占用时仍可能失败，失败会交给重启删除，但不会破坏浏览器本体。
+        /// </summary>
+        private static List<ResidueItem> ScanSystemCaches(InstalledApp app, Action<string> progress)
+        {
+            List<ResidueItem> items = new List<ResidueItem>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Report(progress, "系统组件模式：跳过安装目录与注册表，仅扫描可再生缓存…");
+
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            if (string.IsNullOrEmpty(local)) return items;
+
+            string edge = Path.Combine(local, "Microsoft", "Edge");
+            string profile = Path.Combine(edge, "User Data", "Default");
+            AddCache(items, seen, progress, Path.Combine(profile, "Cache"), "Edge 网页缓存");
+            AddCache(items, seen, progress, Path.Combine(profile, "Code Cache"), "Edge 代码缓存");
+            AddCache(items, seen, progress, Path.Combine(profile, "GPUCache"), "Edge GPU 缓存");
+            AddCache(items, seen, progress, Path.Combine(profile, "ShaderCache"), "Edge 着色器缓存");
+            AddCache(items, seen, progress, Path.Combine(profile, "GrShaderCache"), "Edge 图形缓存");
+            AddCache(items, seen, progress, Path.Combine(profile, "Service Worker", "CacheStorage"), "Edge Service Worker 缓存");
+            AddCache(items, seen, progress, Path.Combine(profile, "Service Worker", "ScriptCache"), "Edge Service Worker 脚本缓存");
+            AddCache(items, seen, progress, Path.Combine(edge, "User Data", "ShaderCache"), "Edge 用户级着色器缓存");
+            AddCache(items, seen, progress, Path.Combine(edge, "User Data", "GrShaderCache"), "Edge 用户级图形缓存");
+
+            AddCache(items, seen, progress, Path.Combine(local, "Microsoft", "EdgeUpdate", "Download"), "Edge 更新器下载缓存");
+            AddCache(items, seen, progress, Path.Combine(local, "Microsoft", "EdgeUpdate", "Install"), "Edge 更新器安装缓存");
+            AddCache(items, seen, progress, Path.Combine(roaming, "Microsoft", "Edge", "User Data", "Default", "Cache"), "Edge 漫游缓存");
+
+            if (progress != null) progress("可清理缓存目录 " + items.Count + " 个；Edge 本体与用户书签/密码保持不动");
+            return items;
+        }
+
+        private static void AddCache(List<ResidueItem> items, HashSet<string> seen, Action<string> progress,
+            string path, string why)
+        {
+            if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
+            long size = DirSize(path, 30000);
+            Add(items, seen, "dir", path, why + "（可再生）", size, "浏览器缓存", true);
+        }
+
         private static void Report(Action<string> p, string s)
         {
             if (p != null) p(s);
         }
 
         private static void Add(List<ResidueItem> items, HashSet<string> seen, string kind, string target,
-            string detail, long size, string evidence)
+            string detail, long size, string evidence, bool bestEffort = false)
         {
             if (string.IsNullOrEmpty(target)) return;
             string key = kind + "|" + target;
@@ -65,6 +110,7 @@ namespace MetroUninstaller
             it.Detail = detail;
             it.SizeBytes = size;
             it.Evidence = evidence;
+            it.BestEffort = bestEffort;
 
             if (kind == "file" || kind == "dir" || kind == "shortcut")
                 it.Protected = SafetyGuard.IsProtectedPath(target);
@@ -84,6 +130,11 @@ namespace MetroUninstaller
         {
             string loc = app.InstallLocation;
             if (string.IsNullOrEmpty(loc) || !Directory.Exists(loc)) return;
+            if (SafetyGuard.IsProtectedPath(loc))
+            {
+                Log.Warn("安装目录属于系统保护范围，已跳过逐文件扫描：" + loc);
+                return;
+            }
             if (!SafetyGuard.IsSafeInstallRoot(loc))
             {
                 Log.Warn("安装目录过于宽泛，已跳过文件扫描：" + loc);

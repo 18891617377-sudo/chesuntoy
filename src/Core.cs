@@ -152,6 +152,8 @@ namespace MetroUninstaller
         public string Hive = "";
         public string ProductCode = "";   // MSI GUID（若可识别）
         public string Normalized = "";
+        public bool SystemComponent;      // Edge / WebView2 / 更新器等 Windows 组件
+        public string SystemReason = "";  // 为什么不允许整包删除
 
         public long EstimatedBytes { get { return EstimatedSizeKB > 0 ? EstimatedSizeKB * 1024L : -1; } }
 
@@ -168,6 +170,7 @@ namespace MetroUninstaller
         public long SizeBytes = -1;
         public bool RestartRequired;
         public bool Protected;           // 命中白名单，永不删除
+        public bool BestEffort;          // 缓存类：删不掉就跳过，不登记重启删除
         public bool Selected = true;
         public bool IsBackup { get; set; }
         public string Evidence = "";     // 归属证据
@@ -271,6 +274,7 @@ namespace MetroUninstaller
         public DateTime Finished = DateTime.Now;
         public bool Success;
         public bool Elevated;
+        public bool CacheOnly;       // 系统组件只清缓存，不是整包卸载
         public string RestorePoint = "";
         public string BackupPath = "";
         public string ReportPath = "";

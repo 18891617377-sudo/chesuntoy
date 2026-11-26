@@ -173,6 +173,11 @@ namespace MetroUninstaller
                 ar.Row.Initial = app.Name.Length > 0 ? app.Name.Substring(0, 1) : "?";
                 ar.Row.Height = Theme.S(72);
                 ar.Row.Data = app;
+                if (app.SystemComponent)
+                {
+                    ar.Row.Chip = "系统组件";
+                    ar.Row.ChipColor = Theme.Slate;
+                }
                 ar.Row.Click += delegate (object s, EventArgs e) { SelectApp(ar); };
                 _list.Controls.Add(ar.Row);
                 _rows.Add(ar);
@@ -190,7 +195,8 @@ namespace MetroUninstaller
             string pub = app.Publisher.Length > 0 ? app.Publisher : "未知发布者";
             string ver = app.Version.Length > 0 ? app.Version : "版本未知";
             string date = app.InstallDate.Length > 0 ? "安装于 " + Ui.FormatDate(app.InstallDate) : "安装日期未知";
-            return pub + "  ·  " + ver + "  ·  " + date + (app.InstallLocation.Length > 0 ? "  ·  " + app.InstallLocation : "");
+            return (app.SystemComponent ? "系统组件  ·  " : "") + pub + "  ·  " + ver + "  ·  " + date +
+                (app.InstallLocation.Length > 0 ? "  ·  " + app.InstallLocation : "");
         }
 
         private void ApplyFilter()
@@ -248,11 +254,14 @@ namespace MetroUninstaller
         private void UpdateButtons()
         {
             bool has = _selected != null && !_busy;
+            bool system = _selected != null && _selected.SystemComponent;
             _btnUninstall.Enabled = has;
             _btnScan.Enabled = has;
             _scanTop.Enabled = has;
             _refresh.Enabled = !_busy;
-            _btnUninstall.Text = _busy ? "执行中…" : "一键卸载";
+            _btnUninstall.Text = _busy ? "执行中…" : (system ? "仅清理缓存" : "一键卸载");
+            _btnScan.Text = system ? "查看缓存" : "深度扫描";
+            _scanTop.Text = system ? "清理浏览器缓存" : "一键深度扫描";
         }
 
         // ------------------------------------------------------------ 详情
@@ -311,6 +320,19 @@ namespace MetroUninstaller
             KV("安装日期", Ui.FormatDate(app.InstallDate));
             KV("安装位置", app.InstallLocation.Length > 0 ? app.InstallLocation : "注册表未记录（将按名称匹配扫描）");
             KV("卸载信息键", app.RegistryPath);
+
+            if (app.SystemComponent)
+            {
+                _dy += Theme.S(8);
+                AddLabel("系统组件保护", 11f, Theme.Red, true, true);
+                AddLabel(app.SystemReason.Length > 0 ? app.SystemReason : "该程序属于 Windows 系统组件，不能整包删除。",
+                    9.5f, Theme.InkSoft, false, true);
+                AddLabel("只能清理可再生缓存；书签、密码、安装目录和 WebView2 都不会动。",
+                    9.5f, Theme.InkSoft, false, true);
+                AddLabel("强行删 Program Files 只会产生大量“待重启删除”，重启后仍会被 EdgeUpdate 修回来。",
+                    9.5f, Theme.Orange, false, true);
+                _dy += Theme.S(8);
+            }
 
             Section("清理范围");
             if (_items == null)
@@ -420,12 +442,14 @@ namespace MetroUninstaller
         {
             if (_selected == null) { ShowMessage("请先选择软件", "在左侧列表中选中一个软件，或在搜索框中定位目标。"); return; }
             if (_busy) return;
+            if (_selected.SystemComponent) { ShowSystemAppDialog(_selected); return; }
             StartScan(_selected, true);
         }
 
         private void StartScan(InstalledApp app, bool autoConfirm)
         {
             if (_busy) return;
+            if (app.SystemComponent) { ShowSystemAppDialog(app); return; }
             _busy = true;
             UpdateButtons();
 
@@ -474,8 +498,79 @@ namespace MetroUninstaller
             t.Start();
         }
 
+        private void ShowSystemAppDialog(InstalledApp app)
+        {
+            Overlay ov = new Overlay();
+            ov.Title = "系统组件，不能整包卸载";
+            ov.Subtitle = app.SystemReason.Length > 0 ? app.SystemReason : "该程序属于 Windows 系统组件。";
+            List<string> lines = new List<string>();
+            lines.Add("上一次的“一键卸载”会把安装目录里的 900+ 个文件塞进待重启删除队列，");
+            lines.Add("重启后 EdgeUpdate 仍会把 Edge 修回来，还可能破坏 WebView2 与系统搜索。");
+            lines.Add("这不是权限不够，而是 Edge 本身就不允许按普通软件那样整包删除。");
+            lines.Add("~本工具只清理可再生缓存：网页缓存、GPU/着色器缓存、更新器下载缓存。");
+            lines.Add("~不删安装目录、不删书签/密码、不删 WebView2、不删系统更新组件。");
+            lines.Add("如果需要官方移除 Edge，请用 Windows 设置 → 应用 → 安装的应用里的卸载入口。");
+            ov.Items = lines;
+            ov.PrimaryText = "仅清理缓存";
+            ov.SecondaryText = "取消";
+            ov.Primary += delegate
+            {
+                CloseOverlay(ov);
+                StartSystemCacheCleanup(app);
+            };
+            ov.Secondary += delegate { CloseOverlay(ov); };
+            ov.Attach(this);
+        }
+
+        private void StartSystemCacheCleanup(InstalledApp app)
+        {
+            if (_busy) return;
+            _busy = true;
+            UpdateButtons();
+            Overlay busy = NewBusy("正在清理浏览器缓存", app.Name + " · 只删除可再生缓存，不动安装目录");
+            busy.Items.Add("系统组件模式：不结束浏览器进程、不执行官方卸载程序。");
+
+            Thread t = new Thread(delegate ()
+            {
+                CleanReport report = null;
+                string error = "";
+                try
+                {
+                    List<ResidueItem> items = ResidueScanner.Scan(app,
+                        delegate (string s) { AppendLog(busy, s); });
+                    report = UninstallPipeline.Run(app, items, new List<DriverInfo>(), false,
+                        delegate (string m) { AppendLog(busy, m); });
+                }
+                catch (Exception ex) { error = ex.Message; AppendLog(busy, "错误：" + ex.Message); }
+
+                try
+                {
+                    if (!IsHandleCreated || IsDisposed) return;
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        CloseOverlay(busy);
+                        _busy = false;
+                        UpdateButtons();
+                        if (report == null) { ShowMessage("缓存清理失败", error); return; }
+                        BuildList();
+                        ShowResult(report);
+                    });
+                }
+                catch { }
+            });
+            t.IsBackground = true;
+            t.Name = "system-cache-cleanup";
+            t.Start();
+        }
+
         private List<DriverInfo> MatchDrivers(InstalledApp app, Action<string> log)
         {
+            if (app.SystemComponent)
+            {
+                log("系统组件模式：不匹配、不删除任何内核驱动。");
+                return new List<DriverInfo>();
+            }
+
             List<DriverInfo> source = Main.Drivers;
             if (source == null)
             {
@@ -648,9 +743,16 @@ namespace MetroUninstaller
             if (report.BackupPath.Length > 0) lines.Add("备份：" + report.BackupPath);
             if (report.RestorePoint.Length > 0) lines.Add("还原点：" + report.RestorePoint);
             lines.Add("报告：" + report.ReportPath);
+            if (report.CacheOnly)
+            {
+                lines.Add("~系统组件本体未删除：Edge / WebView2 安装目录与书签、密码保持原样");
+                lines.Add("~缓存会在浏览器下次启动时自动重建，这是预期行为");
+            }
 
             Overlay ov = new Overlay();
-            ov.Title = report.Success ? "清理完成" : "清理结束（存在失败项）";
+            ov.Title = report.CacheOnly
+                ? (report.Success ? "缓存清理完成" : "缓存清理结束（部分缓存被占用）")
+                : (report.Success ? "清理完成" : "清理结束（存在失败项）");
             ov.Subtitle = report.AppName + " · " + report.Finished.ToString("HH:mm:ss");
             ov.Items = lines;
             ov.PrimaryText = "打开报告";

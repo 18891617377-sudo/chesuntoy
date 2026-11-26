@@ -79,6 +79,173 @@ namespace MetroUninstaller
             return dir;
         }
 
+        /// <summary>生成独立内核驱动（chesunark.sys）的测试签名 / 安装工具包，不碰本程序 exe。</summary>
+        public static string BuildDriverKit(string sysPath, out string dir)
+        {
+            if (!File.Exists(sysPath)) throw new Exception("找不到驱动文件：" + sysPath);
+            dir = Path.Combine(AppPaths.Root, "DriverKits",
+                AppPaths.Sanitize(Path.GetFileNameWithoutExtension(sysPath)) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+            Directory.CreateDirectory(dir);
+
+            string unsigned = Path.Combine(dir, "chesunark-unsigned.sys");
+            File.Copy(sysPath, unsigned, true);
+
+            // 如果发布包里带了源码，复制一份，方便对方自己重编。
+            try
+            {
+                string srcDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "driver");
+                if (Directory.Exists(srcDir))
+                {
+                    string dstSrc = Path.Combine(dir, "driver-source");
+                    Directory.CreateDirectory(dstSrc);
+                    foreach (string f in Directory.GetFiles(srcDir, "*", SearchOption.AllDirectories))
+                    {
+                        string rel = f.Substring(srcDir.Length).TrimStart('\\');
+                        string target = Path.Combine(dstSrc, rel);
+                        Directory.CreateDirectory(Path.GetDirectoryName(target));
+                        File.Copy(f, target, true);
+                    }
+                }
+            }
+            catch { }
+
+            WritePs1(Path.Combine(dir, "make-test-sign-driver.ps1"), MakeTestSignDriverPs1());
+            WriteCmd(Path.Combine(dir, "enable-testsigning.cmd"), EnableTestSigningCmd());
+            WriteCmd(Path.Combine(dir, "disable-testsigning.cmd"), DisableTestSigningCmd());
+            WriteCmd(Path.Combine(dir, "install-driver.cmd"), InstallDriverCmd());
+            WriteCmd(Path.Combine(dir, "uninstall-driver.cmd"), UninstallDriverCmd());
+            File.WriteAllText(Path.Combine(dir, "README.txt"), DriverReadmeText(), Encoding.GetEncoding(936));
+
+            Log.Info("内核驱动签名工具包已生成：" + dir);
+            return dir;
+        }
+
+        private static string DriverReadmeText()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("CHESUN 反 Rootkit 内核驱动 · 签名与安装工具包");
+            sb.AppendLine("===============================================");
+            sb.AppendLine();
+            sb.AppendLine("这不是给 CHESUNUninstaller.exe 签名，而是给你自己编译的 chesunark-unsigned.sys 签名。");
+            sb.AppendLine("驱动只做三件事：ZwUnloadDriver 卸驱动、删 Services 键、删驱动文件；");
+            sb.AppendLine("不摘内核对象、不改 SSDT/inline hook/回调、不绕 PatchGuard。");
+            sb.AppendLine();
+            sb.AppendLine("一、最快路径（赛博文盲版）");
+            sb.AppendLine("1. 右键 make-test-sign-driver.ps1 → 使用 PowerShell 运行。");
+            sb.AppendLine("   脚本会自动请求管理员、创建“内核测试签名”证书、导入本机信任根、");
+            sb.AppendLine("   签名 chesunark-unsigned.sys → chesunark-signed.sys，并执行 signtool verify。");
+            sb.AppendLine("2. 再右键 enable-testsigning.cmd → 使用管理员运行，重启电脑（桌面会出现测试模式水印）。");
+            sb.AppendLine("3. 右键 install-driver.cmd → 使用管理员运行；它用 sc create 安装驱动并尝试启动。");
+            sb.AppendLine("4. 打开 CHESUN Uninstaller 的驱动页，扫描后选择可疑驱动点“卸载该驱动”。");
+            sb.AppendLine("   如果驱动装了本工具，程序会优先调用它做 ZwUnloadDriver，再删服务和文件。");
+            sb.AppendLine();
+            sb.AppendLine("二、没有 signtool");
+            sb.AppendLine("脚本会提示安装 Windows SDK 的 Code Signing Tools；不会偷偷下载安装。");
+            sb.AppendLine();
+            sb.AppendLine("三、重要边界");
+            sb.AppendLine("· 驱动只能卸载“有 DriverUnload 例程”的驱动。");
+            sb.AppendLine("· 没有 Unload 的 rootkit 驱动，热卸载会返回失败；本工具会转禁用服务 + 重启删除。");
+            sb.AppendLine("· 真正藏在 EFI 分区/固件里的 bootkit，仍要用 WinPE 离线包 clean-efi.cmd。");
+            sb.AppendLine("· testsigning 会降低内核安全性，仅测试机短期使用，用完 disable-testsigning.cmd。");
+            sb.AppendLine();
+            sb.AppendLine("四、正式签名");
+            sb.AppendLine("用 EV/OV 证书签 .sys，并按微软要求做 WHQL / attestation 签名后再分发。");
+            sb.AppendLine("自签名证书只在本机测试有效，不能拿去公开发行。");
+            return sb.ToString();
+        }
+
+        private static string MakeTestSignDriverPs1()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("$ErrorActionPreference = 'Stop'");
+            sb.AppendLine("$dir = Split-Path -Parent $MyInvocation.MyCommand.Path");
+            sb.AppendLine("$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)");
+            sb.AppendLine("if (-not $isAdmin) {");
+            sb.AppendLine("    Write-Host '需要管理员权限，正在请求 UAC…'");
+            sb.AppendLine("    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList \"-NoProfile -ExecutionPolicy Bypass -File `\"$PSCommandPath`\"\"");
+            sb.AppendLine("    exit");
+            sb.AppendLine("}");
+            sb.AppendLine("Set-Location -LiteralPath $dir");
+            sb.AppendLine("Write-Host '== CHESUN 内核驱动测试签名 ==' -ForegroundColor Cyan");
+            sb.AppendLine("$src = Join-Path $dir 'chesunark-unsigned.sys'");
+            sb.AppendLine("$signed = Join-Path $dir 'chesunark-signed.sys'");
+            sb.AppendLine("if (-not (Test-Path -LiteralPath $src)) { throw '缺少 chesunark-unsigned.sys' }");
+            sb.AppendLine("Copy-Item -LiteralPath $src -Destination $signed -Force");
+            sb.AppendLine("$subject = 'CN=CHESUN Local Test Kernel Signing'");
+            sb.AppendLine("$cert = Get-ChildItem Cert:\\LocalMachine\\My -CodeSigningCert | Where-Object { $_.Subject -eq $subject } | Select-Object -First 1");
+            sb.AppendLine("if (-not $cert) {");
+            sb.AppendLine("    Write-Host '创建本机内核测试签名证书…'");
+            sb.AppendLine("    $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject `");
+            sb.AppendLine("        -CertStoreLocation Cert:\\LocalMachine\\My -KeyExportPolicy Exportable `");
+            sb.AppendLine("        -KeyUsage DigitalSignature -NotAfter (Get-Date).AddYears(3)");
+            sb.AppendLine("}");
+            sb.AppendLine("$cer = Join-Path $dir 'CHESUN-Kernel-Test.cer'");
+            sb.AppendLine("Export-Certificate -Cert $cert -FilePath $cer -Force | Out-Null");
+            sb.AppendLine("Write-Host '导入本机受信任根 / 受信任发布者…'");
+            sb.AppendLine("Import-Certificate -FilePath $cer -CertStoreLocation Cert:\\LocalMachine\\Root | Out-Null");
+            sb.AppendLine("Import-Certificate -FilePath $cer -CertStoreLocation Cert:\\LocalMachine\\TrustedPublisher | Out-Null");
+            sb.AppendLine("function Find-SignTool {");
+            sb.AppendLine("    $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue");
+            sb.AppendLine("    if ($cmd) { return $cmd.Source }");
+            sb.AppendLine("    foreach ($r in @((Join-Path $env:ProgramFiles 'Windows Kits\\10\\bin'), (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\\10\\bin'))) {");
+            sb.AppendLine("        if (Test-Path -LiteralPath $r) {");
+            sb.AppendLine("            $hit = Get-ChildItem -LiteralPath $r -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |");
+            sb.AppendLine("                Where-Object { $_.FullName -match '\\\\x64\\\\signtool.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1");
+            sb.AppendLine("            if ($hit) { return $hit.FullName }");
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
+            sb.AppendLine("    return $null");
+            sb.AppendLine("}");
+            sb.AppendLine("$signtool = Find-SignTool");
+            sb.AppendLine("if (-not $signtool) {");
+            sb.AppendLine("    Write-Host '未找到 signtool.exe。请安装 Windows SDK 的 Code Signing Tools：' -ForegroundColor Yellow");
+            sb.AppendLine("    Write-Host 'https://developer.microsoft.com/windows/downloads/windows-sdk/'");
+            sb.AppendLine("    Read-Host '安装后重新运行，按回车退出'");
+            sb.AppendLine("    exit 1");
+            sb.AppendLine("}");
+            sb.AppendLine("& $signtool sign /sha1 $cert.Thumbprint /fd SHA256 /v $signed");
+            sb.AppendLine("if ($LASTEXITCODE -ne 0) { throw 'signtool 签名失败' }");
+            sb.AppendLine("& $signtool verify /pa /v $signed");
+            sb.AppendLine("if ($LASTEXITCODE -ne 0) { throw '签名验证失败' }");
+            sb.AppendLine("Write-Host ''");
+            sb.AppendLine("Write-Host ('完成：' + $signed) -ForegroundColor Green");
+            sb.AppendLine("Write-Host '下一步：管理员运行 enable-testsigning.cmd，重启后再 install-driver.cmd。'");
+            sb.AppendLine("Read-Host '按回车退出'");
+            return sb.ToString();
+        }
+
+        private static string InstallDriverCmd()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("@echo off");
+            sb.AppendLine("chcp 65001 >nul");
+            sb.AppendLine("net session >nul 2>&1 || (echo 需要管理员权限 & pause & exit /b 1)");
+            sb.AppendLine("cd /d \"%~dp0\"");
+            sb.AppendLine("if not exist \"chesunark-signed.sys\" (echo 先运行 make-test-sign-driver.ps1 & pause & exit /b 1)");
+            sb.AppendLine("sc stop ChesunArk >nul 2>&1");
+            sb.AppendLine("sc delete ChesunArk >nul 2>&1");
+            sb.AppendLine("sc create ChesunArk type= kernel start= demand error= normal binPath= \"\\??\\%~dp0chesunark-signed.sys\" DisplayName= \"CHESUN Anti-Rootkit Driver\"");
+            sb.AppendLine("if errorlevel 1 (echo sc create 失败 & pause & exit /b 1)");
+            sb.AppendLine("sc start ChesunArk");
+            sb.AppendLine("if errorlevel 1 (echo 启动失败：确认已 enable-testsigning 并重启；或驱动签名/路径不对 & pause & exit /b 1)");
+            sb.AppendLine("echo 已安装并启动 ChesunArk。");
+            sb.AppendLine("pause");
+            return sb.ToString();
+        }
+
+        private static string UninstallDriverCmd()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("@echo off");
+            sb.AppendLine("chcp 65001 >nul");
+            sb.AppendLine("net session >nul 2>&1 || (echo 需要管理员权限 & pause & exit /b 1)");
+            sb.AppendLine("sc stop ChesunArk >nul 2>&1");
+            sb.AppendLine("sc delete ChesunArk");
+            sb.AppendLine("echo 已停止并删除 ChesunArk 服务。");
+            sb.AppendLine("pause");
+            return sb.ToString();
+        }
+
         private static void WritePs1(string path, string text)
         {
             File.WriteAllText(path, text, new UTF8Encoding(true));

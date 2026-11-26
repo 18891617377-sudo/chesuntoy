@@ -1,0 +1,32 @@
+; CHESUN Anti-Rootkit Driver INF（仅演示 sc create 安装也可）
+; 测试签名/正式签名后使用；不要直接把未签名 .sys 装进生产系统。
+
+[Version]
+Signature="$Windows NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=CHESUN
+CatalogFile=chesunark.cat
+DriverVer=11/26/2026,1.0.0.0
+
+[DestinationDirs]
+DefaultDestDir=12
+
+[DefaultInstall.NT]
+CopyFiles=DriverCopy
+
+[DefaultInstall.NT.Services]
+AddService=ChesunArk,0x00000002,DriverService
+
+[DriverCopy]
+chesunark.sys
+
+[DriverService]
+DisplayName=CHESUN Anti-Rootkit Driver
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\chesunark.sys
+
+[Strings]
+CHESUN="CHESUN"

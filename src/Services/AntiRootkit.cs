@@ -83,6 +83,12 @@ namespace MetroUninstaller
         [DllImport("ntdll.dll")]
         private static extern int NtQuerySystemInformation(int infoClass, IntPtr info, int length, out int returnLength);
 
+        public static List<string> LoadedModulePaths()
+        {
+            try { return EnumKernelModulePaths(); }
+            catch (Exception ex) { Log.Warn("内核模块枚举失败：" + ex.Message); return new List<string>(); }
+        }
+
         private static List<string> EnumKernelModulePaths()
         {
             List<string> list = new List<string>();
@@ -162,10 +168,10 @@ namespace MetroUninstaller
                         bad++;
                         Add(list, "高", "已加载但无服务注册的非可信驱动", path);
                     }
-                    else if (outsideWindows)
+                    else if (outsideWindows && !sig.MicrosoftSigned)
                     {
                         bad++;
-                        Add(list, "中", "Windows 目录外加载的驱动（需确认）", path + (sig == null ? " · 无法验证签名" : " · " + sig.State));
+                        Add(list, "中", "Windows 目录外加载的非微软驱动（需确认）", path + (sig == null ? " · 无法验证签名" : " · " + sig.State));
                     }
                 }
                 Add(list, "信息", "已枚举已加载内核模块",
@@ -201,12 +207,15 @@ namespace MetroUninstaller
                 foreach (string raw in lines)
                 {
                     string t = raw.Trim();
-                    if (t.StartsWith("identifier", StringComparison.OrdinalIgnoreCase))
+                    if (t.StartsWith("identifier", StringComparison.OrdinalIgnoreCase) ||
+                        t.StartsWith("标识符", StringComparison.Ordinal))
                     {
                         int sp = t.IndexOf(' ');
                         currentId = sp > 0 ? t.Substring(sp + 1).Trim() : "";
                     }
-                    if (t.StartsWith("path", StringComparison.OrdinalIgnoreCase) && t.IndexOf(".efi", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if ((t.StartsWith("path", StringComparison.OrdinalIgnoreCase) ||
+                         t.StartsWith("路径", StringComparison.Ordinal)) &&
+                        t.IndexOf(".efi", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
                         bool standard = t.IndexOf("\\EFI\\Microsoft\\Boot\\", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                         t.IndexOf("\\EFI\\Boot\\bootmgfw.efi", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -232,7 +241,7 @@ namespace MetroUninstaller
                     Add(list, "信息", "ESP 未挂载", esp);
                     return list;
                 }
-                int files = 0, bad = 0;
+                int files = 0, bad = 0, odd = 0;
                 foreach (string f in Directory.GetFiles(esp, "*", SearchOption.AllDirectories))
                 {
                     string ext = Path.GetExtension(f).ToLowerInvariant();
@@ -244,8 +253,17 @@ namespace MetroUninstaller
                         bad++;
                         Add(list, "高", "ESP 内非微软签名引导组件", f.Replace(esp, "ESP:") + " · " + sig.State + " · " + sig.Signer);
                     }
+                    bool standard = f.IndexOf("\\EFI\\Microsoft\\Boot\\", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    f.IndexOf("\\EFI\\Boot\\", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    f.IndexOf("\\EFI\\Microsoft\\Recovery\\", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (!standard)
+                    {
+                        odd++;
+                        Add(list, "中", "ESP 非标准路径引导组件（需确认厂商归属）",
+                            f.Replace(esp, "ESP:") + " · " + sig.State + " · " + sig.Signer);
+                    }
                 }
-                Add(list, "信息", "ESP 引导组件统计", files + " 个 PE 文件，其中非微软签名 " + bad + " 个");
+                Add(list, "信息", "ESP 引导组件统计", files + " 个 PE 文件，非标准路径 " + odd + " 个，非微软签名 " + bad + " 个");
             }
             catch (Exception ex) { Add(list, "信息", "ESP 扫描失败", ex.Message); }
             finally { UnmountEsp(esp); }
@@ -325,16 +343,23 @@ namespace MetroUninstaller
             sb.AppendLine("if not exist \"%ROOT%\\Windows\\System32\\config\\SYSTEM\" (echo 找不到离线 SYSTEM 注册表 & exit /b 1)");
             sb.AppendLine("set SVC=" + d.ServiceName);
             sb.AppendLine("set SYS=%ROOT%" + rel.Replace("/", "\\"));
-            sb.AppendLine("set BK=%ROOT%\\CHESUN-Backup\\" + AppPaths.Sanitize(d.ServiceName) + "_%date:~0,4%%date:~5,2%%date:~8,2%_%time:~0,2%%time:~3,2%");
+            sb.AppendLine("set BK=%ROOT%\\CHESUN-Backup\\" + AppPaths.Sanitize(string.IsNullOrEmpty(d.ServiceName) ? Path.GetFileName(sysPath) : d.ServiceName) + "_%date:~0,4%%date:~5,2%%date:~8,2%_%time:~0,2%%time:~3,2%");
             sb.AppendLine("if not exist \"%BK%\" mkdir \"%BK%\"");
-            sb.AppendLine("reg load HKLM\\CHESUN_OFF \"%ROOT%\\Windows\\System32\\config\\SYSTEM\" >nul 2>&1");
-            sb.AppendLine("for /f \"tokens=3\" %%i in ('reg query HKLM\\CHESUN_OFF\\Select /v Current 2^>nul') do set CSN=%%i");
-            sb.AppendLine("if not defined CSN set CSN=1");
-            sb.AppendLine("set CS=ControlSet00%CSN%");
-            sb.AppendLine("reg export HKLM\\CHESUN_OFF\\%CS%\\Services\\%SVC% \"%BK%\\service.reg\" /y >nul 2>&1");
-            sb.AppendLine("reg add HKLM\\CHESUN_OFF\\%CS%\\Services\\%SVC% /v Start /t REG_DWORD /d 4 /f >nul 2>&1");
-            sb.AppendLine("reg delete HKLM\\CHESUN_OFF\\%CS%\\Services\\%SVC% /f >nul 2>&1");
-            sb.AppendLine("reg unload HKLM\\CHESUN_OFF >nul 2>&1");
+            if (!string.IsNullOrEmpty(d.ServiceName))
+            {
+                sb.AppendLine("reg load HKLM\\CHESUN_OFF \"%ROOT%\\Windows\\System32\\config\\SYSTEM\" >nul 2>&1");
+                sb.AppendLine("for /f \"tokens=3\" %%i in ('reg query HKLM\\CHESUN_OFF\\Select /v Current 2^>nul') do set CSN=%%i");
+                sb.AppendLine("if not defined CSN set CSN=1");
+                sb.AppendLine("set CS=ControlSet00%CSN%");
+                sb.AppendLine("reg export HKLM\\CHESUN_OFF\\%CS%\\Services\\%SVC% \"%BK%\\service.reg\" /y >nul 2>&1");
+                sb.AppendLine("reg add HKLM\\CHESUN_OFF\\%CS%\\Services\\%SVC% /v Start /t REG_DWORD /d 4 /f >nul 2>&1");
+                sb.AppendLine("reg delete HKLM\\CHESUN_OFF\\%CS%\\Services\\%SVC% /f >nul 2>&1");
+                sb.AppendLine("reg unload HKLM\\CHESUN_OFF >nul 2>&1");
+            }
+            else
+            {
+                sb.AppendLine("rem 该模块没有 Services 注册项，只删除驱动文件");
+            }
             sb.AppendLine("if exist \"%SYS%\" copy /y \"%SYS%\" \"%BK%\\\" >nul 2>&1 & del /f /q \"%SYS%\"");
             if (storeFolder.Length > 0)
                 sb.AppendLine("if exist \"%ROOT%\\Windows\\System32\\DriverStore\\FileRepository\\" + storeFolder + "\" rmdir /s /q \"%ROOT%\\Windows\\System32\\DriverStore\\FileRepository\\" + storeFolder + "\"");

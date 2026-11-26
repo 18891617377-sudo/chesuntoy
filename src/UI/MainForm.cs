@@ -309,6 +309,7 @@ namespace MetroUninstaller
                 "方式 B（正式发布）：购买 OV/EV 证书，用 signtool 签原 exe",
                 "方式 C（测试签名）：只放宽内核驱动校验；设置页可开关，不能放行本 exe",
                 "方式 D（沙盒）：run-in-sandbox.wsb 内不需要签名",
+                "方式 E（独立驱动）：设置页“反 Rootkit 驱动签名”，只给 chesunark.sys 签名，不给本程序签名",
                 "自签名证书只在本机可信，不要拿去给公开发行版签名",
                 "工具包需要 signtool.exe（Windows SDK 的 Code Signing Tools），缺失时脚本会给下载地址",
                 "详细步骤与边界见工具包内 README.txt"
@@ -350,6 +351,78 @@ namespace MetroUninstaller
                 "",
                 "没有 signtool：脚本会提示安装 Windows SDK 的 Code Signing Tools。",
                 "testsigning 只对内核驱动有效，本 exe 仍需要 Authenticode 签名或 WDAC 放行。"
+            };
+            ov.PrimaryText = "打开目录";
+            ov.SecondaryText = "关闭";
+            ov.Primary += delegate { host.Controls.Remove(ov); ov.Dispose(); MainForm.OpenPath(dir); };
+            ov.Secondary += delegate { host.Controls.Remove(ov); ov.Dispose(); };
+            ov.Attach(host);
+        }
+
+        /// <summary>独立反 Rootkit 内核驱动的签名 / 安装入口。只给 .sys 签名，不碰本程序 exe。</summary>
+        public void ShowDriverSigningDialog(MetroPage host)
+        {
+            Overlay ov = new Overlay();
+            ov.Title = "反 Rootkit 内核驱动签名";
+            ov.Subtitle = "这不是给 CHESUNUninstaller.exe 签名，是给你自己编译的 chesunark.sys 签名。";
+            ov.Items = new List<string>
+            {
+                "驱动能力：ZwUnloadDriver 热卸载、删 Services 键、删驱动文件",
+                "不做：摘内核对象、改 SSDT/inline hook/回调、绕 PatchGuard",
+                "当前驱动设备：" + (KernelDriverClient.IsAvailable ? "已安装，可优先热卸载" : "未安装（仍可用服务停止 + 重启删除）"),
+                "",
+                "1. 选择 chesunark.sys（或你编译出的同名驱动）",
+                "2. 生成工具包 → 运行 make-test-sign-driver.ps1（自动建证书、签名、verify）",
+                "3. 运行 enable-testsigning.cmd → 重启（桌面会显示测试模式水印）",
+                "4. 运行 install-driver.cmd 安装驱动",
+                "",
+                "没有 DriverUnload 的 rootkit 驱动无法热卸载；本工具会转禁用服务 + 重启删除。",
+                "EFI 分区里的 bootkit 仍用 WinPE 离线包 clean-efi.cmd。"
+            };
+            ov.PrimaryText = "选择 .sys 生成工具包";
+            ov.SecondaryText = "取消";
+            ov.Primary += delegate
+            {
+                host.Controls.Remove(ov);
+                ov.Dispose();
+                using (OpenFileDialog dlg = new OpenFileDialog())
+                {
+                    dlg.Title = "选择反 Rootkit 驱动（.sys）";
+                    dlg.Filter = "内核驱动 (*.sys)|*.sys|所有文件 (*.*)|*.*";
+                    dlg.CheckFileExists = true;
+                    if (dlg.ShowDialog(host) != DialogResult.OK) return;
+                    try
+                    {
+                        string dir;
+                        SigningHelper.BuildDriverKit(dlg.FileName, out dir);
+                        ShowDriverKitReady(host, dir, dlg.FileName);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("生成驱动签名工具包失败：\n" + ex.Message, "CHESUN Uninstaller",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                }
+            };
+            ov.Secondary += delegate { host.Controls.Remove(ov); ov.Dispose(); };
+            ov.Attach(host);
+        }
+
+        private void ShowDriverKitReady(MetroPage host, string dir, string sourceSys)
+        {
+            Overlay ov = new Overlay();
+            ov.Title = "驱动签名工具包已生成";
+            ov.Subtitle = "先签名，再开 testsigning，重启后安装；证书只在本机有效";
+            ov.Items = new List<string>
+            {
+                "目录：" + dir,
+                "源驱动：" + sourceSys,
+                "1. 右键 make-test-sign-driver.ps1 → 使用 PowerShell 运行（自动 UAC）",
+                "2. 右键 enable-testsigning.cmd → 管理员运行，重启电脑",
+                "3. 右键 install-driver.cmd → 管理员运行",
+                "4. 回到驱动页，扫描可疑驱动后点“卸载该驱动”",
+                "没有 signtool：脚本会提示安装 Windows SDK Code Signing Tools",
+                "只卸载有 DriverUnload 的驱动；没有的走重启删除/离线包"
             };
             ov.PrimaryText = "打开目录";
             ov.SecondaryText = "关闭";

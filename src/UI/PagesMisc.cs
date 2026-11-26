@@ -413,6 +413,11 @@ namespace MetroUninstaller
                 delegate { Main.ShowTestSigningDialog(this); },
                 GlyphKind.Driver, Theme.Orange);
 
+            Add("反 Rootkit 驱动签名",
+                delegate { return KernelDriverClient.IsAvailable ? "驱动已安装" : "需要 .sys"; },
+                delegate { Main.ShowDriverSigningDialog(this); },
+                GlyphKind.Driver, Theme.Red);
+
             _list.ResumeLayout();
             LayoutRows();
         }

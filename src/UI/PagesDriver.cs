@@ -253,7 +253,7 @@ namespace MetroUninstaller
             _detail.ShowIn(this);
             try { _detail.Body.VerticalScroll.Value = 0; } catch { }
             _detail.Invalidate();
-            _btnDel.Enabled = DriverInventory.IsDeletable(dr.Info);
+            _btnDel.Enabled = DriverInventory.IsDeletable(dr.Info) || DriverInventory.IsSuspiciousDeletable(dr.Info);
         }
 
         private void ClearSelection()
@@ -324,6 +324,9 @@ namespace MetroUninstaller
             if (d.IsProtected)
                 AddLabel("按安全红线，此驱动不会出现在待删除列表；如需放行，请在白名单页显式登记并自行承担风险。",
                     8.5f, Theme.InkSoft, false, true);
+            else if (DriverInventory.IsSuspiciousDeletable(d))
+                AddLabel("可疑驱动：无有效签名 / 文件缺失。可点下方“卸载该驱动”显式清理；运行中的镜像会在重启后删除。",
+                    8.5f, Theme.Red, false, true);
             else if (!DriverInventory.IsDeletable(d))
                 AddLabel("归属不明确（低于 45 分），默认不提供删除操作，避免误删其他软件驱动。",
                     8.5f, Theme.Orange, false, true);
@@ -500,7 +503,7 @@ namespace MetroUninstaller
             ov.Primary += delegate
             {
                 CloseOverlay(ov);
-                RunClean(new List<DriverInfo> { d });
+                RunClean(new List<DriverInfo> { d }, true);
             };
             ov.Secondary += delegate { CloseOverlay(ov); };
             ov.Attach(this);
@@ -577,7 +580,7 @@ namespace MetroUninstaller
             catch { }
         }
 
-        private void RunClean(List<DriverInfo> drivers)
+        private void RunClean(List<DriverInfo> drivers, bool forceSuspicious = false)
         {
             _busy = true;
             Overlay busy = NewBusy("正在卸载驱动", drivers.Count + " 个驱动 · 请勿关闭窗口");
@@ -587,7 +590,7 @@ namespace MetroUninstaller
                 List<DriverInfo> refreshed = null;
                 try
                 {
-                    report = UninstallPipeline.CleanDrivers(drivers, delegate (string m) { AppendLog(busy, m); });
+                    report = UninstallPipeline.CleanDrivers(drivers, delegate (string m) { AppendLog(busy, m); }, forceSuspicious);
                     refreshed = DriverInventory.LoadAll(null);
                     if (Main.Apps != null && refreshed != null) DriverInventory.AttributeAll(refreshed, Main.Apps);
                 }

@@ -12,6 +12,10 @@ namespace MetroUninstaller
             @"\windows\system32", @"\windows\syswow64", @"\windows\winsxs", @"\windows\servicing",
             @"\windows\system32\drivers", @"\windows\system32\config", @"\windows\inf",
             @"\program files\common files\microsoft", @"\program files (x86)\common files\microsoft",
+            @"\program files\microsoft\edge", @"\program files (x86)\microsoft\edge",
+            @"\program files\microsoft\edgeupdate", @"\program files (x86)\microsoft\edgeupdate",
+            @"\program files\microsoft\edgewebview", @"\program files (x86)\microsoft\edgewebview",
+            @"\programdata\microsoft\edgeupdate", @"\programdata\microsoft\edgewebview",
             @"\programdata\microsoft\windows", @"\programdata\microsoft\crypto",
             @"\appdata\local\microsoft\windows", @"\appdata\roaming\microsoft\windows",
             @"\appdata\local\microsoft\windowsapps", @"\$recycle.bin", @"\system volume information",
@@ -268,18 +272,24 @@ namespace MetroUninstaller
             return SystemDrivers.Contains(serviceName);
         }
 
-        /// <summary>驱动默认保护判定：系统目录 / Boot 级 / Microsoft 签名 / 白名单。</summary>
+        /// <summary>驱动默认保护判定：系统关键服务 / Microsoft 签名 / 白名单始终保护；
+        /// 无签名或签名无效的驱动即使位于 System32，也允许进入“可疑驱动”显式清理流程。</summary>
         public static bool IsDriverProtected(DriverInfo d)
         {
             if (IsSystemDriverName(d.ServiceName)) return true;
+            if (d.MicrosoftSigned) return true;
+            foreach (string w in UserWhitelist)
+                if ((d.ResolvedPath ?? "").ToLowerInvariant().Contains(w.ToLowerInvariant()) ||
+                    string.Equals(d.ServiceName, w, StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+            // 信任链无法验证的可疑驱动不自动锁死，交给 UI 二次确认后清理。
+            if (d.Suspicious) return false;
+
             string low = (d.ResolvedPath ?? "").ToLowerInvariant();
             string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows).ToLowerInvariant();
             if (low.StartsWith(win + "\\")) return true;
-            if (d.MicrosoftSigned) return true;
             if (d.StartType == 0 || d.StartType == 1) return true;
-            foreach (string w in UserWhitelist)
-                if (low.Contains(w.ToLowerInvariant()) || string.Equals(d.ServiceName, w, StringComparison.OrdinalIgnoreCase))
-                    return true;
             return false;
         }
     }

@@ -21,11 +21,42 @@ namespace MetroUninstaller
             AddFromHive(Registry.LocalMachine, UninstallPath32, "HKLM", list, seen, progress);
             AddFromHive(Registry.CurrentUser, UninstallPath, "HKCU", list, seen, progress);
 
+            MarkSystemComponents(list);
+
             list.Sort(delegate (InstalledApp a, InstalledApp b)
             {
                 return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
             });
             return list;
+        }
+
+        /// <summary>
+        /// Edge 不是普通软件：它和 EdgeUpdate / WebView2 一起被 Windows 当系统组件维护。
+        /// 强行删 Program Files 只会产生大量“待重启删除”，重启后仍会被更新器修回来，还会破坏 WebView2。
+        /// 这里只做标记，真正清理必须走“仅清缓存”，不能走整包删除。
+        /// </summary>
+        private static void MarkSystemComponents(List<InstalledApp> list)
+        {
+            foreach (InstalledApp app in list)
+            {
+                string n = app.Normalized;
+                string p = (app.InstallLocation + " " + app.UninstallString + " " + app.DisplayIcon).ToLowerInvariant();
+                bool edgePath = p.IndexOf("\\microsoft\\edge", StringComparison.Ordinal) >= 0 ||
+                    p.IndexOf("\\microsoft\\edgeupdate", StringComparison.Ordinal) >= 0 ||
+                    p.IndexOf("\\microsoft\\edgewebview", StringComparison.Ordinal) >= 0;
+                bool edgeName = n.IndexOf("microsoftedge", StringComparison.Ordinal) >= 0 ||
+                    n == "edge" || n.IndexOf("edgeupdate", StringComparison.Ordinal) >= 0 ||
+                    n.IndexOf("edgewebview", StringComparison.Ordinal) >= 0;
+                if (!edgePath && !edgeName) continue;
+
+                app.SystemComponent = true;
+                if (n.IndexOf("edgeupdate", StringComparison.Ordinal) >= 0)
+                    app.SystemReason = "Microsoft Edge 更新器，负责把 Edge 装回并修复，不能按普通软件删除";
+                else if (n.IndexOf("edgewebview", StringComparison.Ordinal) >= 0)
+                    app.SystemReason = "WebView2 系统运行库，大量桌面应用依赖它，删除会连带破坏其他软件";
+                else
+                    app.SystemReason = "Microsoft Edge 是 Windows 系统组件，安装目录受系统维护，不能整包删除";
+            }
         }
 
         private static void AddFromHive(RegistryKey hive, string subPath, string hiveName,
@@ -79,6 +110,17 @@ namespace MetroUninstaller
                     app.UninstallString = AsString(k.GetValue("UninstallString"));
                     app.QuietUninstallString = AsString(k.GetValue("QuietUninstallString"));
                     app.DisplayIcon = ExpandIcon(AsString(k.GetValue("DisplayIcon")));
+                    if (app.InstallLocation.Length == 0 && app.DisplayIcon.Length > 0 && File.Exists(app.DisplayIcon))
+                    {
+                        try
+                        {
+                            string dir = Path.GetDirectoryName(app.DisplayIcon);
+                            string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                            if (!string.IsNullOrEmpty(dir) && !dir.StartsWith(win, StringComparison.OrdinalIgnoreCase))
+                                app.InstallLocation = dir;
+                        }
+                        catch { }
+                    }
                     app.InstallDate = AsString(k.GetValue("InstallDate"));
                     app.KeyName = keyName;
                     app.Hive = hiveName;
