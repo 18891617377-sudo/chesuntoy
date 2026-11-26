@@ -345,6 +345,7 @@ namespace MetroUninstaller
                     List<DriverInfo> ds = Main.Drivers;
                     if (ds == null) ds = DriverInventory.LoadAll(null);
                     all.AddRange(AntiRootkit.ScanRootkit(ds));
+                    all.AddRange(AntiRootkit.ScanLoadedModules(ds));
                     all.AddRange(AntiRootkit.ScanBootkit());
                 }
                 catch (Exception ex) { AppendLog(busy, "错误：" + ex.Message); }
@@ -458,7 +459,8 @@ namespace MetroUninstaller
                             "目录：" + dir,
                             "说明：" + readme,
                             "~clean-driver.cmd D:\\ 清服务、禁用启动、删 sys 与 DriverStore 包",
-                            "~clean-efi.cmd 需先 mountvol S: /S，删除前自动备份",
+                            "~clean-efi.cmd D:\\ 先 mountvol S: /S，删除前自动备份",
+                            "~有非标准 BCD 项时生成 clean-bcd.cmd，先导出备份再按 GUID 删除",
                             "~删了 bootmgfw.efi 后用 bcdboot 修复引导"
                         };
                         ov.PrimaryText = "打开目录";

@@ -51,8 +51,9 @@ Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两�
 ### 1.3 反 Rootkit / 反 Bootkit
 
 - **Rootkit 启发式扫描**：服务存在但驱动文件缺失、无签名且不在系统目录、`Start=4` 却仍在运行（隐藏服务）、文件位于 Temp / Downloads / AppData、非微软签名的 Boot/System 级驱动；输出高危 / 可疑分级清单。
-- **Bootkit 扫描**：读取 Secure Boot 状态，解析 `bcdedit /enum all` 中的非标准 `.efi` 加载路径；`mountvol S: /S` 挂载 ESP 后遍历 `\EFI` 下的 `.efi/.exe/.dll`，逐个校验签名，非微软签名项标红，`finally` 卸载 ESP。
-- **WinPE 离线清理包**：一键生成 `clean-driver.cmd` + `clean-efi.cmd` + `README.txt`。离线挂载 SYSTEM 注册表 → 备份 → 禁用并删除服务键 → 删除 `System32\drivers\*.sys` → 删除 DriverStore 包；EFI 部分先备份再删除可疑引导组件，并提示用 `bcdboot` 修复引导。在 WinPE / 微 PE 下原系统内核不运行，可彻底绕过运行中驱动无法卸载的限制。
+- **已加载内核模块枚举**：`NtQuerySystemInformation(SystemModuleInformation)` 取全部已加载内核模块（含完整路径），与 `Services` 注册表比对；已加载但无服务注册、且签名不可信或位于 Windows 目录外的模块单独标记，用于发现删了服务键但仍在内存里的隐藏驱动。
+- **Bootkit 扫描**：读取 Secure Boot 状态，解析 `bcdedit /enum all` 中的非标准 `.efi` 加载路径（带启动项 GUID）；`mountvol S: /S` 挂载 ESP 后遍历整块 ESP 的 `.efi/.exe/.dll`，逐个校验签名，非微软签名项标红，`finally` 卸载 ESP。
+- **WinPE 离线清理包**：一键生成 `clean-driver.cmd` + `clean-efi.cmd` +（有非标准 BCD 项时）`clean-bcd.cmd` + `README.txt`。离线挂载 SYSTEM 注册表 → 备份 → 禁用并删除服务键 → 删除 `System32\drivers\*.sys` → 删除 DriverStore 包；`clean-efi.cmd D:\` 先备份再删除可疑引导组件；BCD 部分先 `/export` 备份，再按 GUID 删除非标准启动项，并提示用 `bcdboot` 修复引导。在 WinPE / 微 PE 下原系统内核不运行，可彻底绕过运行中驱动无法卸载的限制。
 - **WDAC 按哈希拉黑**：调用系统自带 ConfigCI（`New-CIPolicyRule -Level Hash -DriverFilePath ... -Deny`），以 `AllowAll.xml` 为底合并，生成 `policy.cip` + `deploy-wdac.cmd`。部署后该驱动文件哈希被内核拒绝加载，重启即失效；脚本不自动部署，避免误拦导致无法启动。
 
 ### 1.4 一键全流程
@@ -176,7 +177,7 @@ WindowsSandbox.exe .\run-in-sandbox.wsb
 当前构建 SHA256：
 
 ```
-4D0E3DA79DF7BCD17084D0C2F182F340ED040AB386B1034B32FD8482E8E3EEDF
+13CA09A02B57B1EDAA407B3E7DFA7F9860000460AC1112D7A3032E4CECD656CD
 ```
 
 宿主直接运行仍需签名或 WDAC 补充策略放行；沙盒 / 虚拟机内无需放行。
@@ -255,6 +256,15 @@ WindowsSandbox.exe .\run-in-sandbox.wsb
 - 签名工具包：`make-test-sign.ps1` 自动请求 UAC、创建自签名代码签名证书、导入当前用户受信任根/受信任发布者、签出签名副本并 `signtool verify`；同时提供 `check-signature.ps1`、`run-signed.cmd`、`enable-testsigning.cmd`、`disable-testsigning.cmd`、`README.txt`。
 - 设置页新增「代码签名 / 测试签名」与「测试签名（仅内核驱动）」两行；后者可直接启用/关闭 `testsigning`，启用按钮为红色并写明副作用。
 - 明确边界：`testsigning` 只影响内核驱动，不能放行未签名用户态 exe；自签名证书只在本机可信。
+
+---
+
+## 7.4 v1.5 变更（2026-11-26，内核模块枚举与 BCD 清理）
+
+- `ScanLoadedModules`：用 `NtQuerySystemInformation(SystemModuleInformation)` 枚举已加载内核模块（含完整路径），与驱动服务表交叉比对，发现“服务键已删但仍在内存运行”的隐藏驱动；非可信签名标红，Windows 目录外的有效签名驱动标为待确认。
+- `ScanBootkit`：ESP 改为遍历整块分区（不再只看 `\EFI`）；BCD 非标准 `.efi` 路径带上启动项 GUID。
+- `BuildOfflinePack`：新增 `clean-bcd.cmd`（有非标准 BCD 项时生成），先 `bcdedit /export` 备份，再按 GUID 删除，最后提示 `bcdboot` 修复；EFI 路径解析改为按 `ESP:` 标记截取，支持带空格的路径。
+- 仍不实现：运行期无 `DriverUnload` 驱动的安全 unlink、内核回调/SSDT 摘除、复制 SYSTEM/TrustedInstaller 令牌、BYOVD。上述属于内核 rootkit 手法，HVCI/PatchGuard/签名策略会拦，且蓝屏风险极高。
 
 ---
 

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -27,8 +28,7 @@ namespace MetroUninstaller
         {
             List<Finding> list = new List<Finding>();
             if (drivers == null) return list;
-            int n = 0;
-            foreach (DriverInfo d in drivers)
+            int n = 0;            foreach (DriverInfo d in drivers)
             {
                 n++;
                 if (!string.IsNullOrEmpty(d.ResolvedPath) && !File.Exists(d.ResolvedPath))
@@ -57,6 +57,127 @@ namespace MetroUninstaller
             return list;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RTL_PROCESS_MODULE_INFORMATION
+        {
+            public IntPtr Section;
+            public IntPtr MappedBase;
+            public IntPtr ImageBase;
+            public uint ImageSize;
+            public uint Flags;
+            public ushort LoadOrderIndex;
+            public ushort InitOrderIndex;
+            public ushort LoadCount;
+            public ushort OffsetToFileName;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)] public byte[] FullPathName;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RTL_PROCESS_MODULES
+        {
+            public uint NumberOfModules;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 1)]
+            public RTL_PROCESS_MODULE_INFORMATION[] Modules;
+        }
+
+        [DllImport("ntdll.dll")]
+        private static extern int NtQuerySystemInformation(int infoClass, IntPtr info, int length, out int returnLength);
+
+        private static List<string> EnumKernelModulePaths()
+        {
+            List<string> list = new List<string>();
+            int len = 0;
+            int status = NtQuerySystemInformation(11, IntPtr.Zero, 0, out len);
+            if (len <= 0) len = 16 * 1024;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                IntPtr buf = Marshal.AllocHGlobal(len);
+                try
+                {
+                    int needed = 0;
+                    status = NtQuerySystemInformation(11, buf, len, out needed);
+                    if (status == unchecked((int)0xC0000004))
+                    {
+                        len = needed + 4096;
+                        continue;
+                    }
+                    if (status != 0)
+                        throw new Exception("NtQuerySystemInformation 失败，状态 0x" + status.ToString("X8"));
+                    int count = Marshal.ReadInt32(buf);
+                    int offset = (int)Marshal.OffsetOf(typeof(RTL_PROCESS_MODULES), "Modules");
+                    int size = Marshal.SizeOf(typeof(RTL_PROCESS_MODULE_INFORMATION));
+                    for (int i = 0; i < count; i++)
+                    {
+                        IntPtr p = IntPtr.Add(buf, offset + i * size);
+                        RTL_PROCESS_MODULE_INFORMATION mi = (RTL_PROCESS_MODULE_INFORMATION)Marshal.PtrToStructure(p, typeof(RTL_PROCESS_MODULE_INFORMATION));
+                        if (mi.FullPathName == null) continue;
+                        string path = Encoding.ASCII.GetString(mi.FullPathName);
+                        int nul = path.IndexOf('\0');
+                        if (nul >= 0) path = path.Substring(0, nul);
+                        if (path.Length > 0) list.Add(path);
+                    }
+                    return list;
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+            throw new Exception("NtQuerySystemInformation 缓冲区不足，状态 0x" + status.ToString("X8"));
+        }
+
+        /// <summary>枚举已加载内核模块，找“加载了但没有服务注册”的隐藏驱动。</summary>
+        public static List<Finding> ScanLoadedModules(List<DriverInfo> drivers)
+        {
+            List<Finding> list = new List<Finding>();
+            try
+            {
+                List<string> mods = EnumKernelModulePaths();
+                Dictionary<string, string> services = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (drivers != null)
+                {
+                    foreach (DriverInfo d in drivers)
+                    {
+                        string p = (d.ResolvedPath ?? "").Trim();
+                        if (p.Length > 0) services[p] = d.ServiceName;
+                    }
+                }
+
+                string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\');
+                int total = 0, noService = 0, bad = 0;
+                foreach (string raw in mods)
+                {
+                    if (raw.Length == 0) continue;
+                    string path = DriverInventory.ResolveImagePath(raw);
+                    if (path.Length == 0) continue;
+                    total++;
+                    bool registered = services.ContainsKey(path);
+                    if (registered) continue;
+
+                    noService++;
+                    SignatureInfo sig = null;
+                    try { sig = SignatureVerifier.Check(path); } catch { }
+                    bool badSig = sig != null && (sig.State == "unsigned" || sig.State == "invalid");
+                    bool outsideWindows = !path.StartsWith(win + "\\", StringComparison.OrdinalIgnoreCase);
+
+                    if (badSig)
+                    {
+                        bad++;
+                        Add(list, "高", "已加载但无服务注册的非可信驱动", path);
+                    }
+                    else if (outsideWindows)
+                    {
+                        bad++;
+                        Add(list, "中", "Windows 目录外加载的驱动（需确认）", path + (sig == null ? " · 无法验证签名" : " · " + sig.State));
+                    }
+                }
+                Add(list, "信息", "已枚举已加载内核模块",
+                    total + " 个；无服务注册 " + noService + " 个，其中命中可疑 " + bad + " 个（需人工确认）");
+            }
+            catch (Exception ex)
+            {
+                Add(list, "信息", "内核模块枚举失败", ex.Message);
+            }
+            return list;
+        }
+
         public static List<Finding> ScanBootkit()
         {
             List<Finding> list = new List<Finding>();
@@ -76,14 +197,22 @@ namespace MetroUninstaller
             {
                 ExecResult bcd = Executor.Run("bcdedit.exe", "/enum all", 60000, null);
                 string[] lines = (bcd.Output ?? "").Split('\n');
+                string currentId = "";
                 foreach (string raw in lines)
                 {
                     string t = raw.Trim();
+                    if (t.StartsWith("identifier", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int sp = t.IndexOf(' ');
+                        currentId = sp > 0 ? t.Substring(sp + 1).Trim() : "";
+                    }
                     if (t.StartsWith("path", StringComparison.OrdinalIgnoreCase) && t.IndexOf(".efi", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
                         bool standard = t.IndexOf("\\EFI\\Microsoft\\Boot\\", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                         t.IndexOf("\\EFI\\Boot\\bootmgfw.efi", StringComparison.OrdinalIgnoreCase) >= 0;
-                        if (!standard) Add(list, "中", "非标准 BCD 引导路径", t);
+                        if (!standard)
+                            Add(list, "中", "非标准 BCD 引导路径",
+                                "BCD:" + (currentId.Length == 0 ? "{unknown}" : currentId) + " " + t);
                     }
                 }
             }
@@ -98,14 +227,13 @@ namespace MetroUninstaller
             }
             try
             {
-                string efi = Path.Combine(esp, "EFI");
-                if (!Directory.Exists(efi))
+                if (!Directory.Exists(esp))
                 {
-                    Add(list, "信息", "ESP 中未找到 EFI 目录", esp);
+                    Add(list, "信息", "ESP 未挂载", esp);
                     return list;
                 }
                 int files = 0, bad = 0;
-                foreach (string f in Directory.GetFiles(efi, "*", SearchOption.AllDirectories))
+                foreach (string f in Directory.GetFiles(esp, "*", SearchOption.AllDirectories))
                 {
                     string ext = Path.GetExtension(f).ToLowerInvariant();
                     if (ext != ".efi" && ext != ".exe" && ext != ".dll") continue;
@@ -132,6 +260,17 @@ namespace MetroUninstaller
             f.Detail = detail ?? "";
             list.Add(f);
             Log.Info("[" + sev + "] " + title + " — " + f.Detail);
+        }
+
+        private static string EspPathFromDetail(string detail)
+        {
+            if (string.IsNullOrEmpty(detail)) return "";
+            int i = detail.IndexOf("ESP:", StringComparison.OrdinalIgnoreCase);
+            if (i < 0) return "";
+            string s = detail.Substring(i);
+            int sep = s.IndexOf(" · ", StringComparison.Ordinal);
+            if (sep > 0) s = s.Substring(0, sep);
+            return s.Trim();
         }
 
         private static string MountEsp()
@@ -207,17 +346,20 @@ namespace MetroUninstaller
             // EFI 可疑文件清单 + 备份删除脚本
             StringBuilder efi = new StringBuilder();
             efi.AppendLine("@echo off");
-            efi.AppendLine("rem 在 WinPE 中挂载 ESP 后执行：mountvol S: /S，然后运行本脚本");
+            efi.AppendLine("rem 在 WinPE 中挂载 ESP 后执行：mountvol S: /S，然后运行 clean-efi.cmd D:\\");
             efi.AppendLine("set ESP=S:\\");
-            efi.AppendLine("set BK=%~1");
-            efi.AppendLine("if \"%BK%\"==\"\" set BK=C:\\CHESUN-EFI-Backup");
+            efi.AppendLine("set ROOT=%~1");
+            efi.AppendLine("if \"%ROOT%\"==\"\" (echo 用法：clean-efi.cmd ^<离线系统盘^> [备份目录] & exit /b 1)");
+            efi.AppendLine("set BK=%~2");
+            efi.AppendLine("if \"%BK%\"==\"\" set BK=%ROOT%\\CHESUN-EFI-Backup");
             efi.AppendLine("if not exist \"%BK%\" mkdir \"%BK%\"");
             int count = 0;
             foreach (Finding f in bootFindings)
             {
                 if (f.Severity != "高" && f.Severity != "中") continue;
-                if (f.Detail.IndexOf("ESP:", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                string p = f.Detail.Split(' ')[0].Replace("ESP:", "%ESP%");
+                string p = EspPathFromDetail(f.Detail);
+                if (p.Length == 0) continue;
+                p = p.Replace("ESP:", "%ESP%");
                 efi.AppendLine("if exist \"" + p + "\" (copy /y \"" + p + "\" \"%BK%\\\" >nul 2>&1 & del /f /q \"" + p + "\")");
                 count++;
             }
@@ -225,6 +367,41 @@ namespace MetroUninstaller
             efi.AppendLine("echo 已处理 " + count + " 个可疑 EFI 文件，备份在 %BK%");
             efi.AppendLine("pause");
             File.WriteAllText(Path.Combine(dir, "clean-efi.cmd"), efi.ToString(), new UTF8Encoding(false));
+
+            // 非标准 BCD 启动项：单独脚本，先导出备份再删除
+            List<string> bcdIds = new List<string>();
+            foreach (Finding f in bootFindings)
+            {
+                if (f.Severity != "高" && f.Severity != "中") continue;
+                if (!f.Detail.StartsWith("BCD:", StringComparison.OrdinalIgnoreCase)) continue;
+                string rest = f.Detail.Substring(4).Trim();
+                int sp = rest.IndexOf(' ');
+                string id = sp > 0 ? rest.Substring(0, sp) : rest;
+                if (id.StartsWith("{") && id.EndsWith("}") && id != "{unknown}" && !bcdIds.Contains(id)) bcdIds.Add(id);
+            }
+            if (bcdIds.Count > 0)
+            {
+                StringBuilder bcd = new StringBuilder();
+                bcd.AppendLine("@echo off");
+                bcd.AppendLine("setlocal");
+                bcd.AppendLine("rem 用法：clean-bcd.cmd  D:\\   （D: 为离线系统盘；会先导出 BCD 备份）");
+                bcd.AppendLine("set ROOT=%~1");
+                bcd.AppendLine("if \"%ROOT%\"==\"\" (echo 用法：clean-bcd.cmd ^<离线系统盘^> & exit /b 1)");
+                bcd.AppendLine("if not exist \"%ROOT%\\Boot\\BCD\" (echo 找不到 %ROOT%\\Boot\\BCD & pause & exit /b 1)");
+                bcd.AppendLine("set BK=%ROOT%\\CHESUN-Backup\\BCD_%date:~0,4%%date:~5,2%%date:~8,2%_%time:~0,2%%time:~3,2%");
+                bcd.AppendLine("if not exist \"%BK%\" mkdir \"%BK%\"");
+                bcd.AppendLine("bcdedit /store \"%ROOT%\\Boot\\BCD\" /export \"%BK%\\BCD-backup\" >nul 2>&1");
+                bcd.AppendLine("echo 将删除以下非标准启动项：");
+                foreach (string id in bcdIds) bcd.AppendLine("echo   " + id);
+                bcd.AppendLine("choice /c YN /m \"确认删除？可能影响引导，已先导出 BCD 备份\"");
+                bcd.AppendLine("if errorlevel 2 exit /b 0");
+                foreach (string id in bcdIds)
+                    bcd.AppendLine("bcdedit /store \"%ROOT%\\Boot\\BCD\" /delete " + id);
+                bcd.AppendLine("echo [完成] 已删除 " + bcdIds.Count + " 个非标准启动项。");
+                bcd.AppendLine("echo 若无法启动：bcdboot %ROOT%\\Windows /s S: /f UEFI");
+                bcd.AppendLine("pause");
+                File.WriteAllText(Path.Combine(dir, "clean-bcd.cmd"), bcd.ToString(), new UTF8Encoding(false));
+            }
 
             StringBuilder rd = new StringBuilder();
             rd.AppendLine("CHESUN 离线清理包 — " + d.ServiceName);
