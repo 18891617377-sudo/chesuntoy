@@ -53,7 +53,7 @@ Windows 8 Modern UI（Metro 磁贴）风格的深度卸载工具。核心是两�
 - **Rootkit 启发式扫描**：服务存在但驱动文件缺失、无签名/签名无效且不在可信目录、`Start=4` 却仍在运行（隐藏服务）、文件位于 Temp / Downloads / AppData、非 Microsoft 签名的 Boot/System 级驱动；输出高危 / 可疑分级清单。
 - **签名校验含目录签名**：除 `WinVerifyTrust(WTD_CHOICE_FILE)` 外，新增 `CryptCATAdmin*` 查询 catalog（cat）签名。Windows 自带驱动大量是目录签名，只查嵌入签名会误判为 unsigned；无权限查 cat 时状态为 `unknown`，不误报。
 - **已加载内核模块枚举**：`NtQuerySystemInformation(SystemModuleInformation)` 取全部已加载内核模块（含完整路径），与 `Services` 注册表比对；已加载但无服务注册、且签名不可信或位于 Windows 目录外的模块单独标记，用于发现删了服务键但仍在内存里的隐藏驱动。无服务注册的隐藏模块也可以直接进入“可疑驱动”清理。
-- **独立反 Rootkit 驱动（可选）**：`driver\chesunark.c` 是一个独立签名的内核驱动，只调用 `ZwUnloadDriver` / `ZwDeleteKey` / `ZwDeleteFile`。安装后，程序优先通过它热卸载有 `DriverUnload` 的 rootkit 驱动；没有 `DriverUnload` 的驱动仍转“禁用服务 + 重启删除”。
+- **独立反 Rootkit 驱动（可选）**：`driver\chesunark.c` 是一个独立签名的内核驱动，只调用 `ZwUnloadDriver` / `ZwDeleteKey` / `ZwDeleteFile`；设备对象用 `IoCreateDeviceSecure` 限制为 SYSTEM/Administrators 可打开。安装后，程序优先通过它热卸载有 `DriverUnload` 的 rootkit 驱动；没有 `DriverUnload` 的驱动仍转“禁用服务 + 重启删除”。
 - **TrustedInstaller 令牌兜底**：文件/目录在 `takeown` + `icacls` 后仍被拒绝时，复制正在运行的 `TrustedInstaller.exe` 令牌并冒充删除；不“凭空铸造”SYSTEM，只对非保护路径生效。
 - **Bootkit 扫描**：读取 Secure Boot 状态，解析 `bcdedit /enum all` 中的非标准 `.efi` 加载路径（带启动项 GUID；中英文 BCD 字段都解析）；`mountvol S: /S` 挂载 ESP 后遍历整块 ESP 的 `.efi/.exe/.dll`，逐个校验签名，非 Microsoft 签名项标红，并统计非标准路径项，`finally` 卸载 ESP。
 - **WinPE 离线清理包**：一键生成 `clean-driver.cmd` + `clean-efi.cmd` +（有非标准 BCD 项时）`clean-bcd.cmd` + `README.txt`。离线挂载 SYSTEM 注册表 → 备份 → 禁用并删除服务键 → 删除 `System32\drivers\*.sys` → 删除 DriverStore 包；`clean-efi.cmd D:\` 先备份再删除可疑引导组件；BCD 部分先 `/export` 备份，再按 GUID 删除非标准启动项，并提示用 `bcdboot` 修复引导。无服务名的隐藏模块不会误删整个 `Services` 键。在 WinPE / 微 PE 下原系统内核不运行，可彻底绕过运行中驱动无法卸载的限制。

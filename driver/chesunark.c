@@ -19,6 +19,7 @@
 
 #include <ntddk.h>
 #include <ntstrsafe.h>
+#include <wdmsec.h>
 
 #define CHESUN_ARK_DEVICE_NAME L"\\Device\\ChesunArk"
 #define CHESUN_ARK_DOS_NAME    L"\\DosDevices\\ChesunArk"
@@ -155,8 +156,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryPath)
     NTSTATUS status;
 
     RtlInitUnicodeString(&devName, CHESUN_ARK_DEVICE_NAME);
-    status = IoCreateDevice(driver, 0, &devName, FILE_DEVICE_UNKNOWN,
-        FILE_DEVICE_SECURE_OPEN, FALSE, &device);
+    /* 只允许 SYSTEM 与 Administrators 打开设备，避免普通进程借驱动删文件/删服务。 */
+    status = IoCreateDeviceSecure(driver, 0, &devName, FILE_DEVICE_UNKNOWN,
+        FILE_DEVICE_SECURE_OPEN, FALSE,
+        L"D:P(A;;GA;;;SY)(A;;GA;;;BA)", NULL, &device);
     if (!NT_SUCCESS(status)) return status;
 
     RtlInitUnicodeString(&dosName, CHESUN_ARK_DOS_NAME);

@@ -69,6 +69,7 @@ $largs = @(
     $obj,
     (Join-Path $wdk.Lib 'ntoskrnl.lib'),
     (Join-Path $wdk.Lib 'hal.lib'),
+    (Join-Path $wdk.Lib 'wdmsec.lib'),
     (Join-Path $wdk.Lib 'BufferOverflowK.lib')
 )
 & $link @largs

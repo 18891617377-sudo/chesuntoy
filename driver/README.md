@@ -7,6 +7,8 @@
 2. `ZwDeleteKey`：删除 `Services\<name>` 键；
 3. `ZwDeleteFile`：删除指定 NT 路径的驱动文件。
 
+设备对象用 `IoCreateDeviceSecure` 创建，SDDL 只允许 SYSTEM 与 Administrators 打开，普通进程不能借这个驱动删文件/删服务。
+
 明确不做：
 
 - 不摘 `PsLoadedModuleList`；
